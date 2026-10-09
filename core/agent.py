@@ -1,67 +1,149 @@
+"""ConversationalAgent: orquesta RAG + Ollama para responder preguntas."""
+
 from .retriever import RAGRetriever
 from .ollama_client import OllamaClient
 from .document import Document
+from typing import List, Optional
 
 
 class ConversationalAgent:
     """
     Agente conversacional que orquesta el flujo completo de RAG:
     - Recupera fragmentos relevantes usando RAGRetriever
-    - Construye un prompt con el contexto recuperado
+    - Construye un prompt enriquecido con el contexto recuperado
     - Genera una respuesta usando OllamaClient
     """
 
-    def __init__(self, retriever: RAGRetriever, ollama_client: OllamaClient):
+    def __init__(
+        self,
+        retriever: RAGRetriever,
+        ollama_client: OllamaClient,
+        top_k: int = 3,
+        system_instruction: Optional[str] = None,
+    ):
         """
         Inicializa el agente con las dependencias necesarias.
 
         Args:
             retriever: Instancia de RAGRetriever para buscar fragmentos relevantes.
             ollama_client: Instancia de OllamaClient para generar respuestas.
+            top_k: Número de fragmentos a recuperar por defecto (default: 3).
+            system_instruction: Instrucción base del sistema para guiar el comportamiento.
         """
         self.retriever = retriever
         self.ollama_client = ollama_client
+        self.top_k = top_k
+        self.system_instruction = system_instruction or (
+            "Eres un asistente experto que responde preguntas basándose "
+            "EXCLUSIVAMENTE en el contexto proporcionado. "
+            "Si el contexto no contiene la respuesta, di honestamente "
+            "que no tienes suficiente información. No inventes."
+        )
+        self._history: List[dict] = []
 
-    def ask(self, pregunta: str, source: str = None) -> str:
+    def ask(
+        self,
+        pregunta: str,
+        source: Optional[str] = None,
+        top_k: Optional[int] = None,
+        temperature: float = 0.3,
+        max_tokens: Optional[int] = None,
+    ) -> str:
         """
         Procesa una pregunta utilizando el pipeline RAG.
 
         Args:
             pregunta: Pregunta del usuario.
-            source: Optional source filter (e.g., "techbox", "obsidian").
-                   If provided, only results from this source will be considered.
+            source: Filtro opcional por fuente (ej. "techbox", "obsidian").
+            top_k: Número de fragmentos a recuperar (sobrescribe el del constructor).
+            temperature: Temperatura para la generación (0.0-1.0, default: 0.3 para factualidad).
+            max_tokens: Límite de tokens en la respuesta.
 
         Returns:
             Respuesta generada basada en el contexto recuperado.
         """
-        # 1. Buscar fragmentos relevantes
-        chunks = self.retriever.search(pregunta, top_k=3, source=source)
+        k = top_k or self.top_k
 
-        # 2. Construir el system prompt con el contexto
+        # 1. Buscar fragmentos relevantes
+        chunks = self.retriever.search(pregunta, top_k=k, source=source)
+
+        # 2. Construir el prompt con contexto
         if chunks:
-            contexto = "\n\n".join(chunks)
-            system_prompt = (
-                f"Responde basándote únicamente en el siguiente contexto: "
-                f"{contexto}. "
-                f"Si la pregunta no se puede responder con ese contexto, "
-                f"dilo honnestamente en vez de inventar."
+            contexto = "\n\n---\n\n".join(chunks)
+            prompt = (
+                f"{self.system_instruction}\n\n"
+                f"CONTEXTO RECUPERADO:\n{contexto}\n\n"
+                f"PREGUNTA: {pregunta}\n\n"
+                f"RESPUESTA:"
             )
         else:
-            # Si no hay contexto, instructimos al modelo que diga que no sabe
-            system_prompt = (
-                "No se encontró contexto relevante para responder la pregunta. "
-                "Indica que no tienes suficiente información para responder."
+            prompt = (
+                f"{self.system_instruction}\n\n"
+                f"No se encontró contexto relevante para la pregunta: '{pregunta}'.\n"
+                f"Indica que no tienes suficiente información para responder."
             )
 
-        # 3. Preparar los mensajes para el chat
-        messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": pregunta}
-        ]
+        # 3. Generar respuesta usando OllamaClient.generate
+        respuesta = self.ollama_client.generate(
+            prompt=prompt,
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
 
-        # 4. Obtener respuesta del modelo
-        respuesta = self.ollama_client.chat(messages)
+        # 4. Guardar en historial (opcional, para futuro uso multi-turno)
+        self._history.append({"role": "user", "content": pregunta})
+        self._history.append({"role": "assistant", "content": respuesta})
+
         return respuesta
+
+    def ask_with_context(
+        self,
+        pregunta: str,
+        context_chunks: List[str],
+        temperature: float = 0.3,
+        max_tokens: Optional[int] = None,
+    ) -> str:
+        """
+        Procesa una pregunta usando contexto ya proporcionado (sin búsqueda RAG).
+
+        Args:
+            pregunta: Pregunta del usuario.
+            context_chunks: Lista de fragmentos de contexto ya recuperados.
+            temperature: Temperatura para la generación.
+            max_tokens: Límite de tokens en la respuesta.
+
+        Returns:
+            Respuesta generada basada en el contexto proporcionado.
+        """
+        if context_chunks:
+            contexto = "\n\n---\n\n".join(context_chunks)
+            prompt = (
+                f"{self.system_instruction}\n\n"
+                f"CONTEXTO PROPORCIONADO:\n{contexto}\n\n"
+                f"PREGUNTA: {pregunta}\n\n"
+                f"RESPUESTA:"
+            )
+        else:
+            prompt = (
+                f"{self.system_instruction}\n\n"
+                f"PREGUNTA: {pregunta}\n\n"
+                f"(Sin contexto proporcionado. Responde con tu conocimiento general si es apropiado, "
+                f"o indica que necesitas más información.)"
+            )
+
+        return self.ollama_client.generate(
+            prompt=prompt,
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
+
+    def clear_history(self) -> None:
+        """Limpia el historial de conversación."""
+        self._history.clear()
+
+    def get_history(self) -> List[dict]:
+        """Retorna una copia del historial de conversación."""
+        return self._history.copy()
 
 
 # Test rápido si se ejecuta este archivo directamente
