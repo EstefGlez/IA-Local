@@ -12,7 +12,7 @@ class OllamaClient:
         self,
         base_url: str = "http://localhost:11434",
         model: str = "llama3.2:3b",
-        timeout: int = 120,
+        timeout: int = 300,
     ):
         """
         Inicializa el cliente de Ollama.
