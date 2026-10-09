@@ -179,3 +179,11 @@ AsistenteIA-Local/
   siguiente.
 - Cuando falte una decisión (ej. `chromadb` vs `faiss`, o Streamlit vs
   Tkinter para el monitor), preguntar en vez de asumir.
+- "Al correr cualquier script de prueba, SIEMPRE muestra la salida completa 
+  y cruda de la terminal, sin resumirla ni condensarla en una lista de 
+  'ÉXITO'. El usuario necesita ver el texto real para poder verificar que 
+  el resultado es correcto, no solo la palabra 'éxito'."
+- "Si un problema de codificación de caracteres (acentos, símbolos) impide 
+  mostrar texto en la consola de Windows, la solución es arreglar la 
+  codificación de salida (ej. sys.stdout.reconfigure(encoding='utf-8')), 
+  nunca ocultar o resumir el contenido real como solución alternativa."

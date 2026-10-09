@@ -8,19 +8,21 @@ class Document:
     Provides methods to load content and split it into chunks for RAG processing.
     """
 
-    def __init__(self, source: str):
+    def __init__(self, location: str, source_type: str = None):
         """
         Initialize a Document.
 
         Args:
-            source: Either a URL (starting with http:// or https://) or a local file path.
+            location: Either a URL (starting with http:// or https://) or a local file path.
+            source_type: The source type identifier (e.g., "techbox", "obsidian").
         """
-        self.source = source
+        self.location = location
+        self.source = source_type  # e.g., "techbox" or "obsidian"
         self.content = None
         self.chunks = None
 
-        # Determine if source is a URL or file path
-        self.is_url = source.startswith(("http://", "https://"))
+        # Determine if location is a URL or file path
+        self.is_url = location.startswith(("http://", "https://"))
 
     def load_content(self) -> str:
         """
@@ -30,12 +32,12 @@ class Document:
             The raw text content of the document.
         """
         if self.is_url:
-            response = requests.get(self.source)
+            response = requests.get(self.location)
             response.raise_for_status()  # Raise an exception for bad status codes
             self.content = response.text
         else:
             # Local file path
-            with open(self.source, "r", encoding="utf-8") as f:
+            with open(self.location, "r", encoding="utf-8") as f:
                 self.content = f.read()
         return self.content
 
