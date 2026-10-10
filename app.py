@@ -1,6 +1,5 @@
 """Interfaz Streamlit para IA-Local: Chat + Monitor de Recursos."""
 
-import time
 from pathlib import Path
 import streamlit as st
 
@@ -156,10 +155,9 @@ with tab_chat:
 
             with st.chat_message("assistant"):
                 with st.spinner("Pensando y consultando contexto local..."):
-                    start_time = time.perf_counter()
                     try:
-                        # Llamada correcta con todos los parámetros
-                        respuesta = agent.ask(
+                        # Llamada correcta con todos los parámetros - ahora retorna (respuesta, metrics)
+                        respuesta, metrics = agent.ask(
                             pregunta=prompt,
                             source="techbox",
                             top_k=top_k,
@@ -167,25 +165,28 @@ with tab_chat:
                         )
                     except Exception as e:
                         respuesta = f"Ocurrió un error al procesar la solicitud: {e}"
-
-                    elapsed_time = time.perf_counter() - start_time
+                        metrics = {}
 
                     st.markdown(respuesta)
                     st.session_state.messages.append(
                         {"role": "assistant", "content": respuesta}
                     )
 
-                    # Leer métricas reales desde el monitor (si existe archivo de log)
-                    # El monitor guarda métricas en session_state vía agent.py
-                    # Aquí capturamos lo que el monitor generó
-                    dashboard_path = Path("performance_dashboard.png")
-
-                    # Guardar métricas básicas + placeholders para CPU/RAM reales
-                    # Nota: agent.py imprime métricas pero no las retorna; usamos st.session_state para pasarlas
-                    st.session_state.last_metrics = {
-                        "elapsed_time": elapsed_time,
-                        "dashboard_path": str(dashboard_path) if dashboard_path.exists() else None,
-                    }
+                    # Guardar métricas reales retornadas por el agente
+                    if metrics:
+                        st.session_state.last_metrics = metrics
+                    else:
+                        # Fallback si no hay métricas (monitor no disponible)
+                        dashboard_path = Path("performance_dashboard.png")
+                        st.session_state.last_metrics = {
+                            "elapsed_time": 0,
+                            "avg_cpu": 0,
+                            "cpu_peak": 0,
+                            "avg_ram": 0,
+                            "ram_peak": 0,
+                            "samples": 0,
+                            "dashboard_path": str(dashboard_path) if dashboard_path.exists() else None,
+                        }
 
                 st.rerun()
 

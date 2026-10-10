@@ -78,7 +78,7 @@ class ConversationalAgent:
         source: Optional[str] = None,
         top_k: Optional[int] = None,
         temperature: float = 0.3,
-    ) -> str:
+    ) -> tuple[str, dict]:
         k = top_k or self.top_k
 
         # 1. Recuperar contexto desde el retriever
@@ -133,7 +133,20 @@ class ConversationalAgent:
 
         elapsed_time = time.perf_counter() - start_time
 
-        # 3. Mostrar métricas de rendimiento en consola
+        # 3. Calcular métricas de recursos
+        if samples:
+            cpu_vals = [s[1] for s in samples]
+            ram_vals = [s[2] for s in samples]
+            avg_cpu = sum(cpu_vals) / len(cpu_vals)
+            cpu_peak = max(cpu_vals)
+            avg_ram = sum(ram_vals) / len(ram_vals)
+            ram_peak = max(ram_vals)
+            num_samples = len(samples)
+        else:
+            avg_cpu = cpu_peak = avg_ram = ram_peak = 0.0
+            num_samples = 0
+
+        # 4. Mostrar métricas de rendimiento en consola
         print("\n" + "=" * 50)
         print(" [MÉTRICAS DE RENDIMIENTO]")
         print(
@@ -142,13 +155,22 @@ class ConversationalAgent:
         print(f"   • Tiempo de respuesta LLM: {elapsed_time:.2f} segundos")
 
         if samples:
-            cpu_vals = [s[1] for s in samples]
-            ram_vals = [s[2] for s in samples]
-            print(f"   • CPU promedio: {sum(cpu_vals)/len(cpu_vals):.1f}% (pico: {max(cpu_vals):.1f}%)")
-            print(f"   • RAM promedio: {sum(ram_vals)/len(ram_vals):.1f}% (pico: {max(ram_vals):.1f}%)")
-            print(f"   • Muestras tomadas: {len(samples)}")
+            print(f"   • CPU promedio: {avg_cpu:.1f}% (pico: {cpu_peak:.1f}%)")
+            print(f"   • RAM promedio: {avg_ram:.1f}% (pico: {ram_peak:.1f}%)")
+            print(f"   • Muestras tomadas: {num_samples}")
             print(f"   • Gráfica guardada: performance_dashboard.png")
 
         print("=" * 50 + "\n")
 
-        return respuesta
+        # 5. Retornar respuesta + diccionario de métricas
+        metrics = {
+            "elapsed_time": elapsed_time,
+            "avg_cpu": avg_cpu,
+            "cpu_peak": cpu_peak,
+            "avg_ram": avg_ram,
+            "ram_peak": ram_peak,
+            "samples": num_samples,
+            "dashboard_path": "performance_dashboard.png",
+        }
+
+        return respuesta, metrics
