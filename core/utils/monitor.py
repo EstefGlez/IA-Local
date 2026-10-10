@@ -68,22 +68,46 @@ class ResourceMonitor:
             self._thread.join(timeout=2.0)
         return self._samples
 
-    def plot(self, output_path: str = "performance_dashboard.png"):
+    def plot(
+        self,
+        output_path: str = "performance_dashboard.png",
+        all_samples: Optional[List[Tuple[float, float, float]]] = None,
+        session_start_time: Optional[float] = None,
+    ):
         """
         Genera y guarda la gráfica de evolución de recursos.
 
         Args:
             output_path: Ruta donde guardar la imagen
+            all_samples: Muestras acumuladas de toda la sesión (opcional). Si se proporciona,
+                         se usan estas en lugar de self._samples para gráfica acumulativa.
+            session_start_time: Timestamp de inicio de la sesión (para ejes correctos en gráfica acumulativa).
         """
         if plt is None:
             raise RuntimeError("matplotlib no está instalado. Ejecuta: pip install matplotlib")
-        if not self._samples:
+
+        # Usar muestras acumuladas si se proporcionan, sino las de esta inferencia
+        samples_to_plot = all_samples if all_samples is not None else self._samples
+        if not samples_to_plot:
             return
 
-        timestamps, cpu_values, ram_values = zip(*self._samples)
+        # Determinar timestamps para el eje X
+        if all_samples is not None and session_start_time is not None:
+            # Timestamps absolutos desde inicio de sesión
+            timestamps = [s[0] for s in samples_to_plot]
+            xlabel = "Tiempo desde inicio de sesión (segundos)"
+            title = "Uso de Recursos - Sesión Completa"
+        else:
+            # Timestamps relativos a esta inferencia
+            timestamps = [s[0] for s in samples_to_plot]
+            xlabel = "Tiempo (segundos)"
+            title = "Uso de Recursos Durante Inferencia"
 
-        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 6), sharex=True)
-        fig.suptitle("Uso de Recursos Durante Inferencia", fontsize=14, fontweight="bold")
+        cpu_values = [s[1] for s in samples_to_plot]
+        ram_values = [s[2] for s in samples_to_plot]
+
+        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 7), sharex=True)
+        fig.suptitle(title, fontsize=14, fontweight="bold")
 
         # CPU
         ax1.plot(timestamps, cpu_values, color="#2E86C1", linewidth=1.5)
@@ -97,7 +121,7 @@ class ResourceMonitor:
         ax2.plot(timestamps, ram_values, color="#E74C3C", linewidth=1.5)
         ax2.fill_between(timestamps, ram_values, alpha=0.2, color="#E74C3C")
         ax2.set_ylabel("RAM %", fontsize=11)
-        ax2.set_xlabel("Tiempo (segundos)", fontsize=11)
+        ax2.set_xlabel(xlabel, fontsize=11)
         ax2.set_ylim(0, max(max(ram_values) * 1.2, 5))
         ax2.grid(True, alpha=0.3)
         ax2.set_title("Uso de RAM", fontsize=11)
@@ -108,13 +132,21 @@ class ResourceMonitor:
 
 
 @contextmanager
-def monitor_resources(interval: float = 0.5, output_path: str = "performance_dashboard.png"):
+def monitor_resources(
+    interval: float = 0.5,
+    output_path: str = "performance_dashboard.png",
+    all_samples: Optional[List[Tuple[float, float, float]]] = None,
+    session_start_time: Optional[float] = None,
+):
     """
     Context manager para monitorear recursos durante un bloque de código.
 
     Args:
         interval: Intervalo de muestreo en segundos
         output_path: Ruta donde guardar la gráfica generada
+        all_samples: Muestras acumuladas de toda la sesión (opcional). Si se proporciona,
+                     el monitor las extenderá con las nuevas muestras y generará gráfica acumulativa.
+        session_start_time: Timestamp de inicio de la sesión (para timestamps absolutos en gráfica acumulativa).
 
     Yields:
         ResourceMonitor: Instancia del monitor para acceso a datos en bruto
@@ -130,8 +162,30 @@ def monitor_resources(interval: float = 0.5, output_path: str = "performance_das
     try:
         yield monitor
     finally:
-        monitor.stop()
-        monitor.plot(output_path)
+        new_samples = monitor.stop()
+        # Si hay muestras acumuladas, extenderlas con las nuevas (ajustando timestamps)
+        if all_samples is not None and session_start_time is not None:
+            # Las nuevas muestras tienen timestamps relativos a esta inferencia
+            # Convertirlas a timestamps absolutos desde session_start_time
+            current_time = time.time()
+            elapsed_since_session_start = current_time - session_start_time
+            # El timestamp de la primera muestra nueva es ~0 (inicio de esta inferencia)
+            # Sumamos el offset para que sea absoluto
+            adjusted_new_samples = [
+                (elapsed_since_session_start - (new_samples[-1][0] - s[0]) if new_samples else elapsed_since_session_start, s[1], s[2])
+                for s in new_samples
+            ]
+            # Más simple: el timestamp 0 de new_samples corresponde a ahora - elapsed_since_session_start
+            # offset = tiempo actual - tiempo de la última muestra
+            if new_samples:
+                last_sample_relative = new_samples[-1][0]  # duracion total de esta inferencia
+                offset = elapsed_since_session_start - last_sample_relative
+                adjusted_new_samples = [(s[0] + offset, s[1], s[2]) for s in new_samples]
+                all_samples.extend(adjusted_new_samples)
+            # Generar gráfica con todas las muestras acumuladas
+            monitor.plot(output_path, all_samples=all_samples, session_start_time=session_start_time)
+        else:
+            monitor.plot(output_path)
 
 
 if __name__ == "__main__":

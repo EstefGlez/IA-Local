@@ -1,5 +1,6 @@
 """Interfaz Streamlit para IA-Local: Chat + Monitor de Recursos."""
 
+import time
 from pathlib import Path
 import streamlit as st
 
@@ -116,6 +117,9 @@ with st.sidebar:
 
     if st.button("🗑️ Limpiar Chat", use_container_width=True):
         st.session_state.messages = []
+        st.session_state.session_samples = []
+        st.session_state.session_start_time = time.time()
+        st.session_state.last_inference_end_time = None
         if "last_metrics" in st.session_state:
             del st.session_state.last_metrics
         st.rerun()
@@ -130,9 +134,18 @@ st.markdown(
 if agent_loaded and not ollama_client.check_connection():
     st.warning("⚠️ No se puede conectar a Ollama. Asegúrate de que esté corriendo en `http://localhost:11434`.")
 
-# Inicializar historial de chat
+# Inicializar historial de chat y estado de monitoreo de sesión
 if "messages" not in st.session_state:
     st.session_state.messages = []
+
+if "session_samples" not in st.session_state:
+    st.session_state.session_samples = []  # Lista acumulada: (timestamp_abs, cpu%, ram%)
+
+if "session_start_time" not in st.session_state:
+    st.session_state.session_start_time = time.time()
+
+if "last_inference_end_time" not in st.session_state:
+    st.session_state.last_inference_end_time = None
 
 # Pestañas principales
 tab_chat, tab_monitor = st.tabs(["💬 Chat Inteligente", "📊 Monitor de Recursos y Rendimiento"])
@@ -156,12 +169,34 @@ with tab_chat:
             with st.chat_message("assistant"):
                 with st.spinner("Pensando y consultando contexto local..."):
                     try:
-                        # Llamada correcta con todos los parámetros - ahora retorna (respuesta, metrics)
+                        # Insertar punto sintético de "valle" (reposo) si hay inferencia previa
+                        current_time = time.time()
+                        if st.session_state.last_inference_end_time is not None:
+                            idle_duration = current_time - st.session_state.last_inference_end_time
+                            if idle_duration > 0.5:  # Solo si hubo pausa significativa
+                                # Punto de valle: CPU/RAM base del sistema (~1-2% CPU, RAM actual)
+                                try:
+                                    import psutil
+                                    base_cpu = psutil.cpu_percent(interval=0.1)
+                                    base_ram = psutil.Process().memory_percent()
+                                except Exception:
+                                    base_cpu = 1.0
+                                    base_ram = psutil.Process().memory_percent() if 'psutil' in globals() else 10.0
+
+                                # Timestamp absoluto desde inicio de sesión
+                                valley_timestamp = current_time - st.session_state.session_start_time
+                                st.session_state.session_samples.append(
+                                    (valley_timestamp, base_cpu, base_ram)
+                                )
+
+                        # Llamada al agente con parámetros de sesión para gráfica acumulativa
                         respuesta, metrics = agent.ask(
                             pregunta=prompt,
                             source="techbox",
                             top_k=top_k,
                             temperature=temperature,
+                            session_samples=st.session_state.session_samples,
+                            session_start_time=st.session_state.session_start_time,
                         )
                     except Exception as e:
                         respuesta = f"Ocurrió un error al procesar la solicitud: {e}"
@@ -172,9 +207,10 @@ with tab_chat:
                         {"role": "assistant", "content": respuesta}
                     )
 
-                    # Guardar métricas reales retornadas por el agente
+                    # Guardar métricas y actualizar tiempo de fin de inferencia
                     if metrics:
                         st.session_state.last_metrics = metrics
+                        # session_samples se modifica in-place por el monitor, ya está actualizada
                     else:
                         # Fallback si no hay métricas (monitor no disponible)
                         dashboard_path = Path("performance_dashboard.png")
@@ -186,46 +222,52 @@ with tab_chat:
                             "ram_peak": 0,
                             "samples": 0,
                             "dashboard_path": str(dashboard_path) if dashboard_path.exists() else None,
+                            "session_samples": st.session_state.session_samples,
                         }
+
+                    # Actualizar timestamp de fin de inferencia para próximo valle
+                    st.session_state.last_inference_end_time = time.time()
 
                 st.rerun()
 
 # -------------------- PESTAÑA 2: MONITOR DE RECURSOS --------------------
 with tab_monitor:
-    st.subheader("📊 Métricas de Rendimiento de la Última Inferencia")
+    st.subheader("📊 Métricas de Rendimiento - Sesión Acumulativa")
 
-    if "last_metrics" in st.session_state and st.session_state.last_metrics:
-        m = st.session_state.last_metrics
+    # Métricas de sesión (acumuladas)
+    session_samples = st.session_state.get("session_samples", [])
+    if session_samples:
+        # Calcular métricas acumuladas de la sesión
+        all_cpu = [s[1] for s in session_samples]
+        all_ram = [s[2] for s in session_samples]
+        session_duration = session_samples[-1][0] if session_samples else 0
+        total_inferences = len(st.session_state.messages) // 2  # user + assistant pairs
 
         # Tarjetas de métricas en grid 4 columnas
         col1, col2, col3, col4 = st.columns(4)
         with col1:
-            st.metric("⏱️ Tiempo de respuesta", f"{m.get('elapsed_time', 0):.2f}s")
+            st.metric("⏱️ Duración sesión", f"{session_duration:.1f}s")
         with col2:
-            cpu_avg = m.get('avg_cpu', 0)
-            cpu_peak = m.get('cpu_peak', 0)
-            st.metric("🖥️ CPU Promedio", f"{cpu_avg:.1f}%", delta=f"Pico: {cpu_peak:.1f}%" if cpu_peak else None)
+            st.metric("🖥️ CPU Promedio Sesión", f"{sum(all_cpu)/len(all_cpu):.1f}%", delta=f"Pico: {max(all_cpu):.1f}%")
         with col3:
-            ram_avg = m.get('avg_ram', 0)
-            ram_peak = m.get('ram_peak', 0)
-            st.metric("💾 RAM Promedio", f"{ram_avg:.1f}%", delta=f"Pico: {ram_peak:.1f}%" if ram_peak else None)
+            st.metric("💾 RAM Promedio Sesión", f"{sum(all_ram)/len(all_ram):.1f}%", delta=f"Pico: {max(all_ram):.1f}%")
         with col4:
-            st.metric("📊 Muestras", f"{m.get('samples', 0)}")
+            st.metric("📊 Total Muestras", f"{len(session_samples)} ({total_inferences} inferencias)")
 
         st.divider()
 
-        # Gráfico de rendimiento
-        dashboard_path = Path(m.get('dashboard_path', 'performance_dashboard.png'))
+        # Gráfico de rendimiento acumulativo
+        dashboard_path = Path("performance_dashboard.png")
         if dashboard_path.exists():
             st.image(
                 str(dashboard_path),
-                caption="Evolución de CPU y RAM durante la última inferencia",
+                caption="Evolución de CPU y RAM - Sesión completa (picos=inferencias, valles=reposo)",
                 use_container_width=True,
             )
             st.info(
-                "💡 **Nota técnica:** Esta gráfica se genera automáticamente usando "
-                "`psutil` y `matplotlib` para registrar los picos de hardware en "
-                "tiempo real."
+                "💡 **Nota técnica:** Esta gráfica muestra la línea de tiempo continua de toda la sesión. "
+                "Los picos corresponden a inferencias del modelo; los valles son periodos de reposo "
+                "mientras el usuario escribe. Generada con `psutil` + `matplotlib`."
             )
         else:
             st.info(
@@ -233,6 +275,20 @@ with tab_monitor:
             )
     else:
         st.info(
-            "ℹ️ Realiza una consulta en la pestaña **Chat Inteligente** para generar "
-            "las métricas y el gráfico de rendimiento."
+            "ℹ️ Realiza una consulta en la pestaña **Chat Inteligente** para iniciar "
+            "el monitoreo de la sesión."
         )
+
+    # Métricas de la última inferencia (detalle)
+    if "last_metrics" in st.session_state and st.session_state.last_metrics:
+        with st.expander("🔍 Detalle de la última inferencia", expanded=False):
+            m = st.session_state.last_metrics
+            col1, col2, col3, col4 = st.columns(4)
+            with col1:
+                st.metric("⏱️ Tiempo respuesta", f"{m.get('elapsed_time', 0):.2f}s")
+            with col2:
+                st.metric("🖥️ CPU Promedio", f"{m.get('avg_cpu', 0):.1f}%", delta=f"Pico: {m.get('cpu_peak', 0):.1f}%")
+            with col3:
+                st.metric("💾 RAM Promedio", f"{m.get('avg_ram', 0):.1f}%", delta=f"Pico: {m.get('ram_peak', 0):.1f}%")
+            with col4:
+                st.metric("📊 Muestras", f"{m.get('samples', 0)}")

@@ -78,6 +78,8 @@ class ConversationalAgent:
         source: Optional[str] = None,
         top_k: Optional[int] = None,
         temperature: float = 0.3,
+        session_samples: Optional[list] = None,
+        session_start_time: Optional[float] = None,
     ) -> tuple[str, dict]:
         k = top_k or self.top_k
 
@@ -120,7 +122,11 @@ class ConversationalAgent:
         start_time = time.perf_counter()
 
         if MONITOR_AVAILABLE:
-            with monitor_resources(interval=0.3) as monitor:
+            with monitor_resources(
+                interval=0.3,
+                all_samples=session_samples,
+                session_start_time=session_start_time,
+            ) as monitor:
                 respuesta = self.ollama_client.generate(
                     prompt=prompt, temperature=temperature, num_ctx=num_ctx
                 )
@@ -133,7 +139,7 @@ class ConversationalAgent:
 
         elapsed_time = time.perf_counter() - start_time
 
-        # 3. Calcular métricas de recursos
+        # 3. Calcular métricas de recursos (solo de esta inferencia)
         if samples:
             cpu_vals = [s[1] for s in samples]
             ram_vals = [s[2] for s in samples]
@@ -162,7 +168,7 @@ class ConversationalAgent:
 
         print("=" * 50 + "\n")
 
-        # 5. Retornar respuesta + diccionario de métricas
+        # 5. Retornar respuesta + diccionario de métricas (incluye samples de sesión actualizados)
         metrics = {
             "elapsed_time": elapsed_time,
             "avg_cpu": avg_cpu,
@@ -171,6 +177,7 @@ class ConversationalAgent:
             "ram_peak": ram_peak,
             "samples": num_samples,
             "dashboard_path": "performance_dashboard.png",
+            "session_samples": session_samples,  # Referencia a la lista acumulada (modificada in-place)
         }
 
         return respuesta, metrics
