@@ -2,6 +2,13 @@ import re
 import time
 from typing import List, Optional
 
+# Monitor de recursos (opcional)
+try:
+    from core.utils.monitor import monitor_resources
+    MONITOR_AVAILABLE = True
+except ImportError:
+    MONITOR_AVAILABLE = False
+
 
 def clean_html_content(html: str) -> str:
     """Lógica de limpieza inspirada en Wabbott para reducir ruido de HTML/metadatos."""
@@ -109,11 +116,21 @@ class ConversationalAgent:
                 f"Indica que no tienes suficiente información para responder."
             )
 
-        # 2. Inferencia y medición del tiempo de respuesta
+        # 2. Inferencia con monitoreo de recursos
         start_time = time.perf_counter()
-        respuesta = self.ollama_client.generate(
-            prompt=prompt, temperature=temperature, num_ctx=num_ctx
-        )
+
+        if MONITOR_AVAILABLE:
+            with monitor_resources(interval=0.3) as monitor:
+                respuesta = self.ollama_client.generate(
+                    prompt=prompt, temperature=temperature, num_ctx=num_ctx
+                )
+                samples = monitor.stop()  # Obtener muestras para métricas
+        else:
+            respuesta = self.ollama_client.generate(
+                prompt=prompt, temperature=temperature, num_ctx=num_ctx
+            )
+            samples = []
+
         elapsed_time = time.perf_counter() - start_time
 
         # 3. Mostrar métricas de rendimiento en consola
@@ -123,6 +140,15 @@ class ConversationalAgent:
             f"   • Reducción de contexto: {chars_before:,} -> {chars_after:,} caracteres"
         )
         print(f"   • Tiempo de respuesta LLM: {elapsed_time:.2f} segundos")
+
+        if samples:
+            cpu_vals = [s[1] for s in samples]
+            ram_vals = [s[2] for s in samples]
+            print(f"   • CPU promedio: {sum(cpu_vals)/len(cpu_vals):.1f}% (pico: {max(cpu_vals):.1f}%)")
+            print(f"   • RAM promedio: {sum(ram_vals)/len(ram_vals):.1f}% (pico: {max(ram_vals):.1f}%)")
+            print(f"   • Muestras tomadas: {len(samples)}")
+            print(f"   • Gráfica guardada: performance_dashboard.png")
+
         print("=" * 50 + "\n")
 
         return respuesta

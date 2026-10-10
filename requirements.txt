@@ -1,3 +1,7 @@
 chromadb
 requests
 sentence-transformers
+psutil
+matplotlib
+streamlit
+pandas
