@@ -35,6 +35,7 @@ class OllamaClient:
         top_p: float = 0.9,
         max_tokens: Optional[int] = None,
         stream: bool = False,
+        num_ctx: Optional[int] = None,
     ) -> str:
         """
         Envía un prompt a Ollama y devuelve la respuesta generada.
@@ -64,6 +65,9 @@ class OllamaClient:
             "options": {
                 "temperature": temperature,
                 "top_p": top_p,
+                "num_ctx": num_ctx or 1024,
+                "num_predict": 150,
+                "keep_alive": "5m",
             },
         }
 
@@ -97,6 +101,7 @@ class OllamaClient:
         temperature: float = 0.7,
         top_p: float = 0.9,
         max_tokens: Optional[int] = None,
+        num_ctx: Optional[int] = None,
     ) -> str:
         """
         Envía un prompt con contexto (para RAG) a Ollama.
@@ -125,6 +130,7 @@ Responde basándote únicamente en el contexto proporcionado. Si el contexto no 
             temperature=temperature,
             top_p=top_p,
             max_tokens=max_tokens,
+            num_ctx=num_ctx,
         )
 
     def check_connection(self) -> bool:

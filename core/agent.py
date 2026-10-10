@@ -1,45 +1,69 @@
-"""ConversationalAgent: orquesta RAG + Ollama para responder preguntas."""
-
-from .retriever import RAGRetriever
-from .ollama_client import OllamaClient
-from .document import Document
+import re
+import time
 from typing import List, Optional
 
 
+def clean_html_content(html: str) -> str:
+    """Lógica de limpieza inspirada en Wabbott para reducir ruido de HTML/metadatos."""
+    if not html:
+        return ""
+
+    # 1. Eliminar bloques <script> y <style>
+    text = re.sub(
+        r"<script[\s\S]*?<\/script>", "", html, flags=re.IGNORECASE
+    )
+    text = re.sub(
+        r"<style[\s\S]*?<\/style>", "", text, flags=re.IGNORECASE
+    )
+
+    # 2. Eliminar comentarios HTML y URIs base64
+    text = re.sub(r"<!--[\s\S]*?-->", "", text)
+    text = re.sub(r"data:[^;]*;base64,[^\s]*", "", text, flags=re.IGNORECASE)
+
+    # 3. Convertir etiquetas de bloque a saltos de línea
+    text = re.sub(
+        r"<(p|div|li|br|h[1-6])[^>]*>", "\n", text, flags=re.IGNORECASE
+    )
+
+    # 4. Eliminar el resto de etiquetas HTML
+    text = re.sub(r"<[^>]+>", "", text)
+
+    # 5. Decodificar entidades HTML comunes
+    entities = {
+        "&nbsp;": " ",
+        "&amp;": "&",
+        "&lt;": "<",
+        "&gt;": ">",
+        "&quot;": '"',
+        "&#39;": "'",
+    }
+    for entity, char in entities.items():
+        text = text.replace(entity, char)
+
+    # 6. Normalizar espacios
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r"\n\s*\n", "\n\n", text)
+
+    return text.strip()
+
+
 class ConversationalAgent:
-    """
-    Agente conversacional que orquesta el flujo completo de RAG:
-    - Recupera fragmentos relevantes usando RAGRetriever
-    - Construye un prompt enriquecido con el contexto recuperado
-    - Genera una respuesta usando OllamaClient
-    """
 
     def __init__(
         self,
-        retriever: RAGRetriever,
-        ollama_client: OllamaClient,
-        top_k: int = 3,
+        retriever,
+        ollama_client,
+        top_k: int = 1,
         system_instruction: Optional[str] = None,
     ):
-        """
-        Inicializa el agente con las dependencias necesarias.
-
-        Args:
-            retriever: Instancia de RAGRetriever para buscar fragmentos relevantes.
-            ollama_client: Instancia de OllamaClient para generar respuestas.
-            top_k: Número de fragmentos a recuperar por defecto (default: 3).
-            system_instruction: Instrucción base del sistema para guiar el comportamiento.
-        """
         self.retriever = retriever
         self.ollama_client = ollama_client
         self.top_k = top_k
         self.system_instruction = system_instruction or (
-            "Eres un asistente experto que responde preguntas basándose "
-            "EXCLUSIVAMENTE en el contexto proporcionado. "
-            "Si el contexto no contiene la respuesta, di honestamente "
-            "que no tienes suficiente información. No inventes."
+            "Eres un asistente virtual útil. Responde a la pregunta del usuario utilizando "
+            "únicamente la información proporcionada en el contexto a continuación. Si el contexto no "
+            "contiene la respuesta, indica amablemente que no dispones de esa información."
         )
-        self._history: List[dict] = []
 
     def ask(
         self,
@@ -47,154 +71,58 @@ class ConversationalAgent:
         source: Optional[str] = None,
         top_k: Optional[int] = None,
         temperature: float = 0.3,
-        max_tokens: Optional[int] = None,
     ) -> str:
-        """
-        Procesa una pregunta utilizando el pipeline RAG.
-
-        Args:
-            pregunta: Pregunta del usuario.
-            source: Filtro opcional por fuente (ej. "techbox", "obsidian").
-            top_k: Número de fragmentos a recuperar (sobrescribe el del constructor).
-            temperature: Temperatura para la generación (0.0-1.0, default: 0.3 para factualidad).
-            max_tokens: Límite de tokens en la respuesta.
-
-        Returns:
-            Respuesta generada basada en el contexto recuperado.
-        """
         k = top_k or self.top_k
 
-        # 1. Buscar fragmentos relevantes
+        # 1. Recuperar contexto desde el retriever
         chunks = self.retriever.search(pregunta, top_k=k, source=source)
 
-        # 2. Construir el prompt con contexto
         if chunks:
-            contexto = "\n\n---\n\n".join(chunks)
+            raw_context = "\n\n---\n\n".join(chunks)
+
+            # Limpiar contenido (estilo Wabbott)
+            cleaned_context = clean_html_content(raw_context)
+
+            chars_before = len(raw_context)
+            chars_after = len(cleaned_context)
+
+            # Estimar tokens del contexto limpio (~4 chars/token)
+            estimated_tokens = chars_after // 4
+            num_ctx = 2048 if estimated_tokens > 800 else 1024
+
+            if estimated_tokens > 800:
+                print(f"   [INFO] Contexto grande detectado ({estimated_tokens:,} tokens est.) -> ampliando ventana a {num_ctx}")
+
             prompt = (
                 f"{self.system_instruction}\n\n"
-                f"CONTEXTO RECUPERADO:\n{contexto}\n\n"
+                f"CONTEXTO RECUPERADO:\n{cleaned_context}\n\n"
                 f"PREGUNTA: {pregunta}\n\n"
                 f"RESPUESTA:"
             )
         else:
+            chars_before = 0
+            chars_after = 0
+            num_ctx = 1024
             prompt = (
                 f"{self.system_instruction}\n\n"
                 f"No se encontró contexto relevante para la pregunta: '{pregunta}'.\n"
                 f"Indica que no tienes suficiente información para responder."
             )
 
-        # 3. Generar respuesta usando OllamaClient.generate
+        # 2. Inferencia y medición del tiempo de respuesta
+        start_time = time.perf_counter()
         respuesta = self.ollama_client.generate(
-            prompt=prompt,
-            temperature=temperature,
-            max_tokens=max_tokens,
+            prompt=prompt, temperature=temperature, num_ctx=num_ctx
         )
+        elapsed_time = time.perf_counter() - start_time
 
-        # 4. Guardar en historial (opcional, para futuro uso multi-turno)
-        self._history.append({"role": "user", "content": pregunta})
-        self._history.append({"role": "assistant", "content": respuesta})
+        # 3. Mostrar métricas de rendimiento en consola
+        print("\n" + "=" * 50)
+        print(" [MÉTRICAS DE RENDIMIENTO]")
+        print(
+            f"   • Reducción de contexto: {chars_before:,} -> {chars_after:,} caracteres"
+        )
+        print(f"   • Tiempo de respuesta LLM: {elapsed_time:.2f} segundos")
+        print("=" * 50 + "\n")
 
         return respuesta
-
-    def ask_with_context(
-        self,
-        pregunta: str,
-        context_chunks: List[str],
-        temperature: float = 0.3,
-        max_tokens: Optional[int] = None,
-    ) -> str:
-        """
-        Procesa una pregunta usando contexto ya proporcionado (sin búsqueda RAG).
-
-        Args:
-            pregunta: Pregunta del usuario.
-            context_chunks: Lista de fragmentos de contexto ya recuperados.
-            temperature: Temperatura para la generación.
-            max_tokens: Límite de tokens en la respuesta.
-
-        Returns:
-            Respuesta generada basada en el contexto proporcionado.
-        """
-        if context_chunks:
-            contexto = "\n\n---\n\n".join(context_chunks)
-            prompt = (
-                f"{self.system_instruction}\n\n"
-                f"CONTEXTO PROPORCIONADO:\n{contexto}\n\n"
-                f"PREGUNTA: {pregunta}\n\n"
-                f"RESPUESTA:"
-            )
-        else:
-            prompt = (
-                f"{self.system_instruction}\n\n"
-                f"PREGUNTA: {pregunta}\n\n"
-                f"(Sin contexto proporcionado. Responde con tu conocimiento general si es apropiado, "
-                f"o indica que necesitas más información.)"
-            )
-
-        return self.ollama_client.generate(
-            prompt=prompt,
-            temperature=temperature,
-            max_tokens=max_tokens,
-        )
-
-    def clear_history(self) -> None:
-        """Limpia el historial de conversación."""
-        self._history.clear()
-
-    def get_history(self) -> List[dict]:
-        """Retorna una copia del historial de conversación."""
-        return self._history.copy()
-
-
-# Test rápido si se ejecuta este archivo directamente
-if __name__ == "__main__":
-    print("Inicializando componentes para el test...")
-
-    # Crear el retriever
-    retriever = RAGRetriever()
-
-    # Cargar y indexar el documento de Techbox con source="techbox"
-    techbox_url = "https://raw.githubusercontent.com/EstefGlez/techbox-mx/refs/heads/main/especificaciones-techbox.md"
-    print(f"Cargando documento de Techbox desde: {techbox_url}")
-    techbox_doc = Document(location=techbox_url, source_type="techbox")
-    retriever.add_document(techbox_doc)
-    print("Documento de Techbox indexado correctamente.")
-
-    # Cargar y indexar documentos de Obsidian con source="obsidian"
-    obsidian_folder = r"C:\Users\estef\Downloads\Portafolio Sprints\Notebook-TripleTen\Arsenal_Tecnico"
-    print(f"Cargando documentos de Obsidian desde: {obsidian_folder}")
-    try:
-        retriever.load_folder(obsidian_folder, source_type="obsidian")
-        print("Documentos de Obsidian indexados correctamente.")
-    except Exception as e:
-        print(f"Advertencia: No se pudo cargar la carpeta de Obsidian: {e}")
-        print("Continuando solo con el documento de Techbox...")
-
-    # Crear el cliente de Ollama
-    ollama_client = OllamaClient()
-
-    # Crear el agente conversacional
-    agent = ConversationalAgent(retriever, ollama_client)
-
-    # Probar pregunta sobre envíos con source="techbox"
-    pregunta_envio = "¿cuánto tarda el envío?"
-    print(f"\nPregunta (Techbox): {pregunta_envio}")
-
-    try:
-        respuesta_envio = agent.ask(pregunta_envio, source="techbox")
-        print("\nRespuesta:")
-        print(respuesta_envio)
-    except Exception as e:
-        print(f"\nError durante la ejecución: {e}")
-
-    # Probar pregunta sobre pandas/SQL con source="obsidian" (si se cargaron documentos)
-    print(f"\n" + "="*50)
-    pregunta_obsidian = "¿Cómo se hace un groupby en pandas?"
-    print(f"Pregunta (Obsidian): {pregunta_obsidian}")
-
-    try:
-        respuesta_obsidian = agent.ask(pregunta_obsidian, source="obsidian")
-        print("\nRespuesta:")
-        print(respuesta_obsidian)
-    except Exception as e:
-        print(f"\nError durante la ejecución: {e}")
