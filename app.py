@@ -121,19 +121,6 @@ with st.sidebar:
             del st.session_state.last_metrics
         st.rerun()
 
-    # Métricas recientes en sidebar (estilo Gemini)
-    if "last_metrics" in st.session_state:
-        st.divider()
-        st.markdown("### 📈 Métricas Recientes")
-        m = st.session_state.last_metrics
-        col_s1, col_s2 = st.columns(2)
-        col_s1.metric("⏱️ Tiempo", f"{m.get('elapsed_time', 0):.2f}s")
-        col_s2.metric("💾 RAM Promedio", f"{m.get('avg_ram', 0):.1f}%")
-        col_s1.metric("🖥️ CPU Promedio", f"{m.get('avg_cpu', 0):.1f}%")
-        col_s2.metric("📊 Muestras", f"{m.get('samples', 0)}")
-        if m.get('cpu_peak'):
-            st.caption(f"Picos — CPU: {m['cpu_peak']:.1f}% | RAM: {m['ram_peak']:.1f}%")
-
 # ==================== CUERPO PRINCIPAL ====================
 st.title("🤖 IA-Local: Asistente RAG + Monitor de Recursos")
 st.markdown(
@@ -148,76 +135,103 @@ if agent_loaded and not ollama_client.check_connection():
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
-# Mostrar historial
-for message in st.session_state.messages:
-    with st.chat_message(message["role"]):
-        st.markdown(message["content"])
+# Pestañas principales
+tab_chat, tab_monitor = st.tabs(["💬 Chat Inteligente", "📊 Monitor de Recursos y Rendimiento"])
 
-# Entrada de chat
-if prompt := st.chat_input("Escribe tu pregunta sobre Techbox..."):
-    if not agent_loaded:
-        st.error("El agente no está disponible. Revisa la consola.")
-    else:
-        st.session_state.messages.append({"role": "user", "content": prompt})
-        with st.chat_message("user"):
-            st.markdown(prompt)
+# -------------------- PESTAÑA 1: CHAT INTELIGENTE --------------------
+with tab_chat:
+    # Mostrar historial
+    for message in st.session_state.messages:
+        with st.chat_message(message["role"]):
+            st.markdown(message["content"])
 
-        with st.chat_message("assistant"):
-            with st.spinner("Pensando y consultando contexto local..."):
-                start_time = time.perf_counter()
-                try:
-                    # Llamada correcta con todos los parámetros
-                    respuesta = agent.ask(
-                        pregunta=prompt,
-                        source="techbox",
-                        top_k=top_k,
-                        temperature=temperature,
+    # Entrada de chat
+    if prompt := st.chat_input("Escribe tu pregunta sobre Techbox..."):
+        if not agent_loaded:
+            st.error("El agente no está disponible. Revisa la consola.")
+        else:
+            st.session_state.messages.append({"role": "user", "content": prompt})
+            with st.chat_message("user"):
+                st.markdown(prompt)
+
+            with st.chat_message("assistant"):
+                with st.spinner("Pensando y consultando contexto local..."):
+                    start_time = time.perf_counter()
+                    try:
+                        # Llamada correcta con todos los parámetros
+                        respuesta = agent.ask(
+                            pregunta=prompt,
+                            source="techbox",
+                            top_k=top_k,
+                            temperature=temperature,
+                        )
+                    except Exception as e:
+                        respuesta = f"Ocurrió un error al procesar la solicitud: {e}"
+
+                    elapsed_time = time.perf_counter() - start_time
+
+                    st.markdown(respuesta)
+                    st.session_state.messages.append(
+                        {"role": "assistant", "content": respuesta}
                     )
-                except Exception as e:
-                    respuesta = f"Ocurrió un error al procesar la solicitud: {e}"
 
-                elapsed_time = time.perf_counter() - start_time
+                    # Leer métricas reales desde el monitor (si existe archivo de log)
+                    # El monitor guarda métricas en session_state vía agent.py
+                    # Aquí capturamos lo que el monitor generó
+                    dashboard_path = Path("performance_dashboard.png")
 
-                st.markdown(respuesta)
-                st.session_state.messages.append(
-                    {"role": "assistant", "content": respuesta}
-                )
+                    # Guardar métricas básicas + placeholders para CPU/RAM reales
+                    # Nota: agent.py imprime métricas pero no las retorna; usamos st.session_state para pasarlas
+                    st.session_state.last_metrics = {
+                        "elapsed_time": elapsed_time,
+                        "dashboard_path": str(dashboard_path) if dashboard_path.exists() else None,
+                    }
 
-                # Leer métricas reales desde el monitor (si existe archivo de log)
-                # El monitor guarda métricas en session_state vía agent.py
-                # Aquí capturamos lo que el monitor generó
-                dashboard_path = Path("performance_dashboard.png")
+                st.rerun()
 
-                # Guardar métricas básicas + placeholders para CPU/RAM reales
-                # Nota: agent.py imprime métricas pero no las retorna; usamos st.session_state para pasarlas
-                st.session_state.last_metrics = {
-                    "elapsed_time": elapsed_time,
-                    "dashboard_path": str(dashboard_path) if dashboard_path.exists() else None,
-                }
+# -------------------- PESTAÑA 2: MONITOR DE RECURSOS --------------------
+with tab_monitor:
+    st.subheader("📊 Métricas de Rendimiento de la Última Inferencia")
 
-            st.rerun()
+    if "last_metrics" in st.session_state and st.session_state.last_metrics:
+        m = st.session_state.last_metrics
 
-# ==================== DASHBOARD DE RECURSOS (estilo Gemini) ====================
-st.divider()
-st.subheader("🖥️ Monitor de Rendimiento y Recursos del Sistema")
+        # Tarjetas de métricas en grid 4 columnas
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            st.metric("⏱️ Tiempo de respuesta", f"{m.get('elapsed_time', 0):.2f}s")
+        with col2:
+            cpu_avg = m.get('avg_cpu', 0)
+            cpu_peak = m.get('cpu_peak', 0)
+            st.metric("🖥️ CPU Promedio", f"{cpu_avg:.1f}%", delta=f"Pico: {cpu_peak:.1f}%" if cpu_peak else None)
+        with col3:
+            ram_avg = m.get('avg_ram', 0)
+            ram_peak = m.get('ram_peak', 0)
+            st.metric("💾 RAM Promedio", f"{ram_avg:.1f}%", delta=f"Pico: {ram_peak:.1f}%" if ram_peak else None)
+        with col4:
+            st.metric("📊 Muestras", f"{m.get('samples', 0)}")
 
-dashboard_path = Path("performance_dashboard.png")
-if dashboard_path.exists():
-    col_img1, col_img2 = st.columns([2, 1])
-    with col_img1:
-        st.image(
-            str(dashboard_path),
-            caption="Evolución de CPU y RAM durante la última inferencia",
-            use_container_width=True,
-        )
-    with col_img2:
+        st.divider()
+
+        # Gráfico de rendimiento
+        dashboard_path = Path(m.get('dashboard_path', 'performance_dashboard.png'))
+        if dashboard_path.exists():
+            st.image(
+                str(dashboard_path),
+                caption="Evolución de CPU y RAM durante la última inferencia",
+                use_container_width=True,
+            )
+            st.info(
+                "💡 **Nota técnica:** Esta gráfica se genera automáticamente usando "
+                "`psutil` y `matplotlib` para registrar los picos de hardware en "
+                "tiempo real."
+            )
+        else:
+            st.info(
+                "ℹ️ El gráfico de rendimiento se generará tras la próxima consulta."
+            )
+    else:
         st.info(
-            "💡 **Nota técnica:** Esta gráfica se genera automáticamente usando "
-            "`psutil` y `matplotlib` para registrar los picos de hardware en "
-            "tiempo real."
+            "ℹ️ Realiza una consulta en la pestaña **Chat Inteligente** para generar "
+            "las métricas y el gráfico de rendimiento."
         )
-else:
-    st.info(
-        "ℹ️ Realiza una consulta en el chat superior para generar la gráfica de "
-        "rendimiento."
-    )
