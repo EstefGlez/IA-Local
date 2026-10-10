@@ -120,21 +120,12 @@ with st.sidebar:
         st.session_state.session_samples = []
         st.session_state.session_start_time = time.time()
         st.session_state.last_inference_end_time = None
+        st.session_state.processing = False
         if "last_metrics" in st.session_state:
             del st.session_state.last_metrics
         st.rerun()
 
-# ==================== CUERPO PRINCIPAL ====================
-st.title("🤖 IA-Local: Asistente RAG + Monitor de Recursos")
-st.markdown(
-    "Asistente local con Llama 3.2 + monitoreo de CPU/RAM en tiempo real"
-)
-
-# Verificar conexión Ollama
-if agent_loaded and not ollama_client.check_connection():
-    st.warning("⚠️ No se puede conectar a Ollama. Asegúrate de que esté corriendo en `http://localhost:11434`.")
-
-# Inicializar historial de chat y estado de monitoreo de sesión
+# ==================== INICIALIZAR ESTADO DE SESIÓN ====================
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
@@ -147,6 +138,92 @@ if "session_start_time" not in st.session_state:
 if "last_inference_end_time" not in st.session_state:
     st.session_state.last_inference_end_time = None
 
+if "processing" not in st.session_state:
+    st.session_state.processing = False
+
+# ==================== PROCESAMIENTO DE INFERENCIA (al inicio, antes de renderizar UI) ====================
+if st.session_state.processing and agent_loaded:
+    # Obtener el último mensaje del usuario (el que disparó el processing)
+    user_messages = [m for m in st.session_state.messages if m["role"] == "user"]
+    if user_messages:
+        last_prompt = user_messages[-1]["content"]
+
+        # Insertar punto sintético de "valle" (reposo) si hay inferencia previa
+        current_time = time.time()
+        if st.session_state.last_inference_end_time is not None:
+            idle_duration = current_time - st.session_state.last_inference_end_time
+            if idle_duration > 0.5:  # Solo si hubo pausa significativa
+                # Punto de valle: CPU/RAM base del sistema
+                try:
+                    import psutil
+                    base_cpu = psutil.cpu_percent(interval=0.1)
+                    base_ram = psutil.Process().memory_percent()
+                except Exception:
+                    base_cpu = 1.0
+                    base_ram = 10.0
+
+                # Timestamp absoluto desde inicio de sesión
+                valley_timestamp = current_time - st.session_state.session_start_time
+                st.session_state.session_samples.append(
+                    (valley_timestamp, base_cpu, base_ram)
+                )
+
+        # Llamada al agente con parámetros de sesión para gráfica acumulativa
+        try:
+            respuesta, metrics = agent.ask(
+                pregunta=last_prompt,
+                source="techbox",
+                top_k=top_k,
+                temperature=temperature,
+                session_samples=st.session_state.session_samples,
+                session_start_time=st.session_state.session_start_time,
+            )
+        except Exception as e:
+            respuesta = f"Ocurrió un error al procesar la solicitud: {e}"
+            metrics = {}
+
+        # Guardar respuesta del asistente
+        st.session_state.messages.append(
+            {"role": "assistant", "content": respuesta}
+        )
+
+        # Guardar métricas y actualizar tiempo de fin de inferencia
+        if metrics:
+            st.session_state.last_metrics = metrics
+            # session_samples se modifica in-place por el monitor, ya está actualizada
+        else:
+            # Fallback si no hay métricas (monitor no disponible)
+            dashboard_path = Path("performance_dashboard.png")
+            st.session_state.last_metrics = {
+                "elapsed_time": 0,
+                "avg_cpu": 0,
+                "cpu_peak": 0,
+                "avg_ram": 0,
+                "ram_peak": 0,
+                "samples": 0,
+                "dashboard_path": str(dashboard_path) if dashboard_path.exists() else None,
+                "session_samples": st.session_state.session_samples,
+            }
+
+        # Actualizar timestamp de fin de inferencia para próximo valle
+        st.session_state.last_inference_end_time = time.time()
+
+        # Resetear flag de procesamiento
+        st.session_state.processing = False
+
+        # Rerun para renderizar la respuesta sin spinner
+        st.rerun()
+
+# ==================== CUERPO PRINCIPAL ====================
+st.title("🤖 IA-Local: Asistente RAG + Monitor de Recursos")
+st.markdown(
+    "Asistente local con Llama 3.2 + monitoreo de CPU/RAM en tiempo real"
+)
+
+# Verificar conexión Ollama
+if agent_loaded and not ollama_client.check_connection():
+    st.warning("⚠️ No se puede conectar a Ollama. Asegúrate de que esté corriendo en `http://localhost:11434`.")
+
 # Pestañas principales
 tab_chat, tab_monitor = st.tabs(["💬 Chat Inteligente", "📊 Monitor de Recursos y Rendimiento"])
 
@@ -157,78 +234,13 @@ with tab_chat:
         with st.chat_message(message["role"]):
             st.markdown(message["content"])
 
-    # Entrada de chat
-    if prompt := st.chat_input("Escribe tu pregunta sobre Techbox..."):
-        if not agent_loaded:
-            st.error("El agente no está disponible. Revisa la consola.")
-        else:
-            st.session_state.messages.append({"role": "user", "content": prompt})
-            with st.chat_message("user"):
-                st.markdown(prompt)
-
-            with st.chat_message("assistant"):
-                with st.spinner("Pensando y consultando contexto local..."):
-                    try:
-                        # Insertar punto sintético de "valle" (reposo) si hay inferencia previa
-                        current_time = time.time()
-                        if st.session_state.last_inference_end_time is not None:
-                            idle_duration = current_time - st.session_state.last_inference_end_time
-                            if idle_duration > 0.5:  # Solo si hubo pausa significativa
-                                # Punto de valle: CPU/RAM base del sistema (~1-2% CPU, RAM actual)
-                                try:
-                                    import psutil
-                                    base_cpu = psutil.cpu_percent(interval=0.1)
-                                    base_ram = psutil.Process().memory_percent()
-                                except Exception:
-                                    base_cpu = 1.0
-                                    base_ram = psutil.Process().memory_percent() if 'psutil' in globals() else 10.0
-
-                                # Timestamp absoluto desde inicio de sesión
-                                valley_timestamp = current_time - st.session_state.session_start_time
-                                st.session_state.session_samples.append(
-                                    (valley_timestamp, base_cpu, base_ram)
-                                )
-
-                        # Llamada al agente con parámetros de sesión para gráfica acumulativa
-                        respuesta, metrics = agent.ask(
-                            pregunta=prompt,
-                            source="techbox",
-                            top_k=top_k,
-                            temperature=temperature,
-                            session_samples=st.session_state.session_samples,
-                            session_start_time=st.session_state.session_start_time,
-                        )
-                    except Exception as e:
-                        respuesta = f"Ocurrió un error al procesar la solicitud: {e}"
-                        metrics = {}
-
-                    st.markdown(respuesta)
-                    st.session_state.messages.append(
-                        {"role": "assistant", "content": respuesta}
-                    )
-
-                    # Guardar métricas y actualizar tiempo de fin de inferencia
-                    if metrics:
-                        st.session_state.last_metrics = metrics
-                        # session_samples se modifica in-place por el monitor, ya está actualizada
-                    else:
-                        # Fallback si no hay métricas (monitor no disponible)
-                        dashboard_path = Path("performance_dashboard.png")
-                        st.session_state.last_metrics = {
-                            "elapsed_time": 0,
-                            "avg_cpu": 0,
-                            "cpu_peak": 0,
-                            "avg_ram": 0,
-                            "ram_peak": 0,
-                            "samples": 0,
-                            "dashboard_path": str(dashboard_path) if dashboard_path.exists() else None,
-                            "session_samples": st.session_state.session_samples,
-                        }
-
-                    # Actualizar timestamp de fin de inferencia para próximo valle
-                    st.session_state.last_inference_end_time = time.time()
-
-                st.rerun()
+    # Mostrar spinner "Pensando..." SOLO durante el procesamiento (antes del input fijo)
+    if st.session_state.processing:
+        with st.chat_message("assistant"):
+            with st.spinner("Pensando y consultando contexto local..."):
+                # El procesamiento real ya ocurrió en el rerun anterior
+                # Aquí solo mostramos el spinner visual mientras se completa el rerun
+                pass
 
 # -------------------- PESTAÑA 2: MONITOR DE RECURSOS --------------------
 with tab_monitor:
@@ -292,3 +304,16 @@ with tab_monitor:
                 st.metric("💾 RAM Promedio", f"{m.get('avg_ram', 0):.1f}%", delta=f"Pico: {m.get('ram_peak', 0):.1f}%")
             with col4:
                 st.metric("📊 Muestras", f"{m.get('samples', 0)}")
+
+# ==================== INPUT FIJO AL FINAL (fuera de tabs) ====================
+prompt = st.chat_input("Escribe tu pregunta sobre Techbox...", disabled=not agent_loaded)
+
+if prompt:
+    if not agent_loaded:
+        st.error("El agente no está disponible. Revisa la consola.")
+    else:
+        # Agregar mensaje del usuario al historial
+        st.session_state.messages.append({"role": "user", "content": prompt})
+        # Activar flag de procesamiento para el siguiente rerun
+        st.session_state.processing = True
+        st.rerun()
