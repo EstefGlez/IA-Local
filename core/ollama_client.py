@@ -2,7 +2,7 @@
 
 import json
 import requests
-from typing import Optional
+from typing import Optional, List, Dict
 
 
 class OllamaClient:
@@ -26,6 +26,7 @@ class OllamaClient:
         self.model = model
         self.timeout = timeout
         self._generate_endpoint = f"{self.base_url}/api/generate"
+        self._chat_endpoint = f"{self.base_url}/api/chat"
 
     def generate(
         self,
@@ -39,13 +40,14 @@ class OllamaClient:
     ) -> str:
         """
         Envía un prompt a Ollama y devuelve la respuesta generada.
+        Usa el endpoint /api/generate (completion simple).
 
         Args:
             prompt: El texto del prompt a enviar al modelo
             model: Modelo a usar (sobrescribe el del constructor si se proporciona)
             temperature: Temperatura para el muestreo (0.0 - 1.0)
             top_p: Top-p para nucleus sampling
-            max_tokens: Número máximo de tokens a generar (None = sin límite)
+            max_tokens: Número máximo de tokens a generar (None = sin límite, default 2048)
             stream: Si True, usa streaming (no implementado en esta versión)
 
         Returns:
@@ -65,14 +67,11 @@ class OllamaClient:
             "options": {
                 "temperature": temperature,
                 "top_p": top_p,
-                "num_ctx": num_ctx or 1024,
-                "num_predict": 150,
+                "num_ctx": num_ctx or 4096,
+                "num_predict": max_tokens or 2048,
                 "keep_alive": "5m",
             },
         }
-
-        if max_tokens is not None:
-            payload["options"]["num_predict"] = max_tokens
 
         try:
             response = requests.post(
@@ -90,6 +89,66 @@ class OllamaClient:
 
         except requests.RequestException as e:
             raise requests.RequestException(f"Error al comunicarse con Ollama: {e}") from e
+        except json.JSONDecodeError as e:
+            raise ValueError(f"Respuesta no es JSON válido: {e}") from e
+
+    def chat(
+        self,
+        messages: List[Dict[str, str]],
+        model: Optional[str] = None,
+        temperature: float = 0.7,
+        top_p: float = 0.9,
+        max_tokens: Optional[int] = None,
+        num_ctx: Optional[int] = None,
+    ) -> str:
+        """
+        Envía una conversación completa (chat history) a Ollama usando /api/chat.
+        Este es el método preferido para mantener contexto conversacional.
+
+        Args:
+            messages: Lista de mensajes en formato [{"role": "user|assistant|system", "content": "..."}]
+            model: Modelo a usar (sobrescribe el del constructor si se proporciona)
+            temperature: Temperatura para el muestreo (0.0 - 1.0)
+            top_p: Top-p para nucleus sampling
+            max_tokens: Número máximo de tokens a generar (None = sin límite, default 2048)
+            num_ctx: Tamaño de la ventana de contexto (default 4096)
+
+        Returns:
+            La respuesta generada por el modelo como string
+
+        Raises:
+            requests.RequestException: Si hay error en la petición HTTP
+            ValueError: Si la respuesta no tiene el formato esperado
+        """
+        payload = {
+            "model": model or self.model,
+            "messages": messages,
+            "stream": False,
+            "options": {
+                "temperature": temperature,
+                "top_p": top_p,
+                "num_ctx": num_ctx or 4096,
+                "num_predict": max_tokens or 2048,
+                "keep_alive": "5m",
+            },
+        }
+
+        try:
+            response = requests.post(
+                self._chat_endpoint,
+                json=payload,
+                timeout=self.timeout,
+            )
+            response.raise_for_status()
+            data = response.json()
+
+            if "message" not in data or "content" not in data["message"]:
+                raise ValueError(f"Respuesta inesperada de Ollama chat: {data}")
+
+            return data["message"]["content"].strip()
+
+        except requests.RequestException as e:
+            raise requests.RequestException(f"Error al comunicarse con Ollama chat: {e}") from e
         except json.JSONDecodeError as e:
             raise ValueError(f"Respuesta no es JSON válido: {e}") from e
 

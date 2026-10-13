@@ -9,6 +9,13 @@ try:
 except ImportError:
     MONITOR_AVAILABLE = False
 
+# RagSourceManager para fuentes dinámicas
+try:
+    from core.rag_source_manager import RagSourceManager
+    RAG_SOURCES_AVAILABLE = True
+except ImportError:
+    RAG_SOURCES_AVAILABLE = False
+
 
 def clean_html_content(html: str) -> str:
     """Lógica de limpieza inspirada en Wabbott para reducir ruido de HTML/metadatos."""
@@ -60,63 +67,97 @@ class ConversationalAgent:
         self,
         retriever,
         ollama_client,
-        top_k: int = 1,
+        top_k: int = 3,
         system_instruction: Optional[str] = None,
+        rag_source_manager=None,
     ):
         self.retriever = retriever
         self.ollama_client = ollama_client
         self.top_k = top_k
+        # System prompt conciso: sin saludos repetitivos, directo al grano
         self.system_instruction = system_instruction or (
-            "Eres un asistente virtual útil. Responde a la pregunta del usuario utilizando "
-            "únicamente la información proporcionada en el contexto a continuación. Si el contexto no "
-            "contiene la respuesta, indica amablemente que no dispones de esa información."
+            "Eres un asistente conciso y directo. Responde basándote en el contexto proporcionado. "
+            "Si el contexto no tiene la información, dilo claramente. No repitas saludos ni frases "
+            "de cortesía innecesarias en cada turno. Sé breve y útil."
         )
+        self.rag_source_manager = rag_source_manager
+        self._rag_enabled = True  # Flag para fallback graceful
 
     def ask(
         self,
         pregunta: str,
+        history: Optional[List[dict]] = None,
         source: Optional[str] = None,
         top_k: Optional[int] = None,
         temperature: float = 0.3,
         session_samples: Optional[list] = None,
         session_start_time: Optional[float] = None,
     ) -> tuple[str, dict]:
-        k = top_k or self.top_k
+        """
+        Genera una respuesta usando el historial completo de la conversación.
 
-        # 1. Recuperar contexto desde el retriever
-        chunks = self.retriever.search(pregunta, top_k=k, source=source)
+        Args:
+            pregunta: Pregunta actual del usuario
+            history: Historial de mensajes [{"role": "user|assistant", "content": "..."}]
+            source: Fuente RAG específica a filtrar
+            top_k: Número de chunks a recuperar
+            temperature: Temperatura de muestreo
+            session_samples: Lista de muestras de recursos para métricas de sesión
+            session_start_time: Timestamp de inicio de sesión
+
+        Returns:
+            Tupla (respuesta, metrics_dict)
+        """
+        k = top_k or self.top_k
+        rag_fallback = False
+
+        # 1. Recuperar contexto desde el retriever (si RAG está habilitado)
+        if self._rag_enabled and self.rag_source_manager and self.rag_source_manager.has_sources():
+            search_source = source
+            chunks = self.retriever.search(pregunta, top_k=k, source=search_source)
+        else:
+            chunks = self.retriever.search(pregunta, top_k=k, source=None)
+            rag_fallback = True
 
         if chunks:
             raw_context = "\n\n---\n\n".join(chunks)
-
-            # Limpiar contenido (estilo Wabbott)
             cleaned_context = clean_html_content(raw_context)
 
             chars_before = len(raw_context)
             chars_after = len(cleaned_context)
 
-            # Estimar tokens del contexto limpio (~4 chars/token)
             estimated_tokens = chars_after // 4
-            num_ctx = 2048 if estimated_tokens > 800 else 1024
+            num_ctx = 4096 if estimated_tokens > 800 else 2048
 
             if estimated_tokens > 800:
                 print(f"   [INFO] Contexto grande detectado ({estimated_tokens:,} tokens est.) -> ampliando ventana a {num_ctx}")
 
-            prompt = (
-                f"{self.system_instruction}\n\n"
-                f"CONTEXTO RECUPERADO:\n{cleaned_context}\n\n"
-                f"PREGUNTA: {pregunta}\n\n"
-                f"RESPUESTA:"
-            )
+            # Construir mensajes para chat: system + context + history + current question
+            messages = [
+                {"role": "system", "content": self.system_instruction},
+                {"role": "system", "content": f"CONTEXTO RECUPERADO:\n{cleaned_context}"},
+            ]
         else:
             chars_before = 0
             chars_after = 0
-            num_ctx = 1024
-            prompt = (
-                f"{self.system_instruction}\n\n"
-                f"No se encontró contexto relevante para la pregunta: '{pregunta}'.\n"
-                f"Indica que no tienes suficiente información para responder."
-            )
+            num_ctx = 2048
+            # Modo fallback: sin contexto RAG
+            messages = [
+                {"role": "system", "content": self.system_instruction},
+            ]
+            if rag_fallback or not self._rag_enabled:
+                messages.append({"role": "system", "content": "[MODO OFFLINE - Sin contexto RAG disponible]"})
+            else:
+                messages.append({"role": "system", "content": "No se encontró contexto relevante para la pregunta."})
+
+        # Añadir historial de conversación (excluyendo el system prompt actual)
+        if history:
+            for msg in history:
+                if msg["role"] in ("user", "assistant"):
+                    messages.append({"role": msg["role"], "content": msg["content"]})
+
+        # Añadir pregunta actual
+        messages.append({"role": "user", "content": pregunta})
 
         # 2. Inferencia con monitoreo de recursos
         start_time = time.perf_counter()
@@ -127,13 +168,13 @@ class ConversationalAgent:
                 all_samples=session_samples,
                 session_start_time=session_start_time,
             ) as monitor:
-                respuesta = self.ollama_client.generate(
-                    prompt=prompt, temperature=temperature, num_ctx=num_ctx
+                respuesta = self.ollama_client.chat(
+                    messages=messages, temperature=temperature, num_ctx=num_ctx
                 )
-                samples = monitor.stop()  # Obtener muestras para métricas
+                samples = monitor.stop()
         else:
-            respuesta = self.ollama_client.generate(
-                prompt=prompt, temperature=temperature, num_ctx=num_ctx
+            respuesta = self.ollama_client.chat(
+                messages=messages, temperature=temperature, num_ctx=num_ctx
             )
             samples = []
 
@@ -168,7 +209,7 @@ class ConversationalAgent:
 
         print("=" * 50 + "\n")
 
-        # 5. Retornar respuesta + diccionario de métricas (incluye samples de sesión actualizados)
+        # 5. Retornar respuesta + diccionario de métricas
         metrics = {
             "elapsed_time": elapsed_time,
             "avg_cpu": avg_cpu,
@@ -177,7 +218,17 @@ class ConversationalAgent:
             "ram_peak": ram_peak,
             "samples": num_samples,
             "dashboard_path": "performance_dashboard.png",
-            "session_samples": session_samples,  # Referencia a la lista acumulada (modificada in-place)
+            "session_samples": session_samples,
+            "rag_used": not rag_fallback and self._rag_enabled,
+            "rag_fallback": rag_fallback,
         }
 
         return respuesta, metrics
+
+    def set_rag_enabled(self, enabled: bool) -> None:
+        """Activa/desactiva el uso de RAG (para fallback graceful)."""
+        self._rag_enabled = enabled
+
+    def is_rag_enabled(self) -> bool:
+        """Verifica si RAG está habilitado y disponible."""
+        return self._rag_enabled and self.rag_source_manager and self.rag_source_manager.has_sources()
