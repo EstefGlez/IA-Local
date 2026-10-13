@@ -746,7 +746,12 @@ class ConversationalAgent:
             "- Saludos, despedidas o conversaciones casuales\n"
             "- Preguntas de conocimiento general que no requieren memoria guardada\n"
             "- Responder basándote en tu conocimiento general\n\n"
-            "Cuando uses la herramienta, integra los resultados de forma natural en tu respuesta."
+            "### REGLA CRÍTICA DE PRESENTACIÓN DE RESULTADOS:\n"
+            "Cuando invoques search_saved_memories y esta devuelva resultados con archivos encontrados:\n"
+            "1. DEBES mostrar directamente al usuario el CONTENIDO COMPLETO (respuesta_completa) de cada archivo encontrado en tu respuesta final.\n"
+            "2. NO preguntes al usuario '¿Quieres que te muestre el contenido?' o '¿Te interesa ver...?' - la herramienta YA te entregó la información, preséntala de inmediato.\n"
+            "3. Integra el contenido de forma natural y organizada, citando el tema y nombre de archivo de cada memoria.\n"
+            "4. Si hay múltiples resultados, presenta todos los contenidos completos, no solo resúmenes."
         )
         self.rag_source_manager = rag_source_manager
         self._rag_enabled = True  # Flag para fallback graceful
