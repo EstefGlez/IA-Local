@@ -219,11 +219,15 @@ def save_memory_file(session_id: str, filename: str, data: dict) -> bool:
 
 
 def delete_memory_file(session_id: str, filename: str) -> bool:
-    """Elimina un archivo de memoria."""
+    """Elimina un archivo de memoria y limpia el directorio padre si queda vacío."""
     filepath = get_memory_dir(session_id) / filename
     if filepath.exists():
         try:
             filepath.unlink()
+            # Verificar si el directorio padre quedó vacío y eliminarlo si es así
+            parent_dir = filepath.parent
+            if parent_dir.exists() and not any(parent_dir.iterdir()):
+                parent_dir.rmdir()
             return True
         except Exception:
             return False
