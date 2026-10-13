@@ -6,6 +6,7 @@
 - [x] Clase `OllamaClient` - Cliente HTTP para API local de Ollama (POST a /api/generate, modelo llama3.2:3b)
 - [x] Clase `ConversationalAgent` - Orquesta RAG + Ollama: búsqueda → contexto → generación
 - [x] Archivos de configuración: `.env`, `.env.example`, `.gitignore`, `requirements.txt`
+- [x] **Refactor de memoria**: Trigger ligero `save_json_memory` (solo suggested_filename + tema) + función determinista `build_memory_json_from_response()` que empaqueta fielmente toda la respuesta Markdown
 
 ## 🚧 En progreso / Próximos pasos
 1. Instalar Ollama y descargar modelo `llama3.2:3b`
