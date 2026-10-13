@@ -80,15 +80,92 @@ def get_save_json_memory_tool() -> Dict[str, Any]:
     }
 
 
-def build_memory_json_from_response(assistant_response: str, suggested_filename: str, tema: str) -> dict:
+def _is_substantive_content(text: str) -> bool:
+    """
+    Verifica si un texto contiene contenido técnico sustancial (no solo saludos/trivialidades).
+
+    Args:
+        text: Texto a evaluar
+
+    Returns:
+        True si tiene contenido técnico sustancial, False si es saludo/trivial/vacío
+    """
+    if not text or not text.strip():
+        return False
+
+    text_lower = text.strip().lower()
+
+    # Patrones de saludos/trivialidades comunes
+    trivial_patterns = [
+        r'^\s*(hola|buenos?\s*d[ií]as?|buenas?\s*tardes?|buenas?\s*noches?)\s*[!?.]*\s*$',
+        r'^\s*(hey|hi|hello)\s*[!?.]*\s*$',
+        r'^\s*(gracias?|thanks?|thx)\s*[!?.]*\s*$',
+        r'^\s*(ok|vale|entendido|entendido\.?|de acuerdo)\s*[!?.]*\s*$',
+        r'^\s*(¿qu[eé]\s+puedes?\s+hacer|qu[eé]\s+puedes?\s+hacer)\s*[!?.]*\s*$',
+        r'^\s*(¿hay\s+(info|informaci[oó]n|algo))\s*[!?.]*\s*$',
+        r'^\s*(c[oó]mo\s+est[aá]s?|qu[eé]\s+tal)\s*[!?.]*\s*$',
+        r'^\s*(adios|hasta\s+luego|bye)\s*[!?.]*\s*$',
+    ]
+
+    for pattern in trivial_patterns:
+        if re.match(pattern, text_lower):
+            return False
+
+    # Si tiene muy pocos caracteres y no parece código/técnico
+    if len(text.strip()) < 50:
+        # Verificar si tiene indicadores técnicos
+        tech_indicators = ['def ', 'class ', 'import ', 'function', '```', '```python', '```json',
+                          'configuraci[oó]n', 'c[oó]digo', 'script', 'api', 'endpoint',
+                          'base de datos', 'sql', 'query', 'tabla', 'esquema',
+                          'memoria', 'archivo', 'guardar', 'persistir']
+        has_tech = any(re.search(ind, text_lower) for ind in tech_indicators)
+        if not has_tech:
+            return False
+
+    return True
+
+
+def _find_last_substantive_assistant_message(history: Optional[List[dict]]) -> Optional[str]:
+    """
+    Busca en el historial hacia atrás el último mensaje del asistente con contenido sustancial.
+
+    Args:
+        history: Lista de mensajes del historial
+
+    Returns:
+        Contenido del último mensaje sustancial del asistente, o None si no hay
+    """
+    if not history:
+        return None
+
+    # Recorrer hacia atrás
+    for msg in reversed(history):
+        if msg.get("role") == "assistant":
+            content = msg.get("content", "")
+            if _is_substantive_content(content):
+                return content
+
+    return None
+
+
+def build_memory_json_from_response(
+    assistant_response: str,
+    suggested_filename: str,
+    tema: str,
+    history: Optional[List[dict]] = None
+) -> dict:
     """
     Construye el JSON de memoria de forma determinista a partir de la última respuesta
     completa del asistente, preservando TODO el Markdown (explicaciones, bloques de código, etc.)
+
+    Si la respuesta actual está vacía o es trivial (saludo), busca en el historial
+    el último mensaje sustancial del asistente.
 
     Args:
         assistant_response: Texto Markdown completo de la última respuesta del asistente
         suggested_filename: Nombre de archivo sugerido por el modelo
         tema: Tema/resumen breve del contenido
+        history: Historial de conversación opcional para fallback
 
     Returns:
         Diccionario con la estructura completa de memoria lista para guardar
@@ -99,15 +176,36 @@ def build_memory_json_from_response(assistant_response: str, suggested_filename:
     if not suggested_filename.endswith(".json"):
         suggested_filename += ".json"
 
+    # Validar contenido de la respuesta actual
+    content_to_save = assistant_response
+    used_fallback = False
+
+    if not _is_substantive_content(assistant_response):
+        # Buscar en historial si está disponible
+        if history:
+            fallback_content = _find_last_substantive_assistant_message(history)
+            if fallback_content:
+                content_to_save = fallback_content
+                used_fallback = True
+            else:
+                # No hay contenido sustancial en historial, usar respuesta actual pero marcar
+                content_to_save = assistant_response
+                used_fallback = False
+        else:
+            # Sin historial, usar respuesta actual
+            content_to_save = assistant_response
+            used_fallback = False
+
     # Estructura fiel: empaquetar todo el Markdown en content.respuesta_completa
     memory_data = {
         "metadata": {
             "saved_at": datetime.now().isoformat(),
             "filename": suggested_filename,
-            "topic": tema
+            "topic": tema,
+            "fallback_used": used_fallback
         },
         "content": {
-            "respuesta_completa": assistant_response
+            "respuesta_completa": content_to_save
         }
     }
 
@@ -551,6 +649,13 @@ class ConversationalAgent:
             "   bloques de código de ejemplo completos, y contexto suficiente para ser útil en futuras sesiones.\n"
             "5. Para interacciones casuales (saludos, preguntas simples, charla trivial): NO uses herramientas,\n"
             "   simplemente responde de forma natural y conversacional.\n"
+            "6. PROHIBIDO invocar `save_json_memory` ante: saludos iniciales (\"Hola\", \"Buenos días\"), "
+            "preguntas exploratorias (\"¿Qué puedes hacer?\", \"¿Hay info disponible?\"), "
+            "frases de inicio de conversación, confirmaciones simples (\"OK\", \"Entendido\"), "
+            "o cualquier interacción que NO contenga contenido técnico generado por ti que valga la pena persistir. "
+            "La herramienta SOLO debe invocarse cuando el usuario ordene EXPLÍCITAMENTE guardar un resumen, "
+            "archivo o contenido técnico YA GENERADO en la conversación (ej: \"Guarda esto en memoria\", "
+            "\"Crea un archivo con esta explicación\", \"Persiste esta configuración\").\n"
         )
         self.rag_source_manager = rag_source_manager
         self._rag_enabled = True  # Flag para fallback graceful
@@ -725,10 +830,12 @@ class ConversationalAgent:
 
                         if suggested_filename and tema:
                             # Usar la respuesta del asistente actual (content) para construir el JSON fiel
+                            # Pasar history para fallback si la respuesta actual es trivial
                             memory_data = build_memory_json_from_response(
                                 assistant_response=content,
                                 suggested_filename=suggested_filename,
-                                tema=tema
+                                tema=tema,
+                                history=history
                             )
                             memory_proposals.append({
                                 "filename": suggested_filename,
