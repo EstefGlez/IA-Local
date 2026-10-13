@@ -7,6 +7,7 @@
 - [x] Clase `ConversationalAgent` - Orquesta RAG + Ollama: búsqueda → contexto → generación
 - [x] Archivos de configuración: `.env`, `.env.example`, `.gitignore`, `requirements.txt`
 - [x] **Refactor de memoria**: Trigger ligero `save_json_memory` (solo suggested_filename + tema) + función determinista `build_memory_json_from_response()` que empaqueta fielmente toda la respuesta Markdown
+- [x] **Fix crítico memoria**: System prompt reforzado (prohíbe save_json_memory en saludos/casual) + validación de contenido sustancial en `build_memory_json_from_response()` con fallback a historial
 
 ## 🚧 En progreso / Próximos pasos
 1. Instalar Ollama y descargar modelo `llama3.2:3b`
