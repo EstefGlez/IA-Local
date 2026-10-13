@@ -100,21 +100,23 @@ class OllamaClient:
         top_p: float = 0.9,
         max_tokens: Optional[int] = None,
         num_ctx: Optional[int] = None,
-    ) -> str:
+        tools: Optional[List[Dict]] = None,
+    ) -> Dict:
         """
         Envía una conversación completa (chat history) a Ollama usando /api/chat.
         Este es el método preferido para mantener contexto conversacional.
 
         Args:
-            messages: Lista de mensajes en formato [{"role": "user|assistant|system", "content": "..."}]
+            messages: Lista de mensajes en formato [{"role": "user|assistant|system|tool", "content": "...", "tool_calls": [...], "tool_name": "..."}]
             model: Modelo a usar (sobrescribe el del constructor si se proporciona)
             temperature: Temperatura para el muestreo (0.0 - 1.0)
             top_p: Top-p para nucleus sampling
             max_tokens: Número máximo de tokens a generar (None = sin límite, default 2048)
             num_ctx: Tamaño de la ventana de contexto (default 4096)
+            tools: Lista de definiciones de herramientas para function calling
 
         Returns:
-            La respuesta generada por el modelo como string
+            Diccionario con la respuesta completa: {"content": str, "tool_calls": List[Dict] | None}
 
         Raises:
             requests.RequestException: Si hay error en la petición HTTP
@@ -133,6 +135,9 @@ class OllamaClient:
             },
         }
 
+        if tools:
+            payload["tools"] = tools
+
         try:
             response = requests.post(
                 self._chat_endpoint,
@@ -142,10 +147,17 @@ class OllamaClient:
             response.raise_for_status()
             data = response.json()
 
-            if "message" not in data or "content" not in data["message"]:
+            if "message" not in data:
                 raise ValueError(f"Respuesta inesperada de Ollama chat: {data}")
 
-            return data["message"]["content"].strip()
+            message = data["message"]
+            content = message.get("content", "").strip()
+            tool_calls = message.get("tool_calls", None)
+
+            return {
+                "content": content,
+                "tool_calls": tool_calls
+            }
 
         except requests.RequestException as e:
             raise requests.RequestException(f"Error al comunicarse con Ollama chat: {e}") from e

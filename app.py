@@ -70,6 +70,167 @@ from core.conversation_manager import ConversationManager
 from core.rag_source_manager import RagSourceManager, SourceType
 
 
+# Variable global para directorio base de memoria (se inicializa en init_core_components)
+memory_base_dir = Path("./data/archivos_memoria")
+memory_base_dir.mkdir(parents=True, exist_ok=True)
+
+
+# ==================== FUNCIONES DE MEMORIA ====================
+def get_memory_dir(session_id: str) -> Path:
+    """Obtiene el directorio de memoria para una sesión."""
+    return memory_base_dir / session_id
+
+
+def list_memory_files(session_id: str) -> List[Path]:
+    """Lista archivos JSON de memoria para una sesión."""
+    mem_dir = get_memory_dir(session_id)
+    if not mem_dir.exists():
+        return []
+    return sorted(mem_dir.glob("*.json"))
+
+
+def detect_json_memory_proposal(content: str) -> Optional[dict]:
+    """
+    Detecta si un mensaje del asistente contiene una propuesta de guardado de memoria en formato JSON.
+    Busca bloques de código JSON que parezcan propuestas de memoria (con campos filename, content, topic_summary).
+
+    Returns:
+        Dict con la propuesta parseada o None si no se detecta.
+    """
+    import re
+
+    # Buscar bloques de código JSON
+    json_blocks = re.findall(r'```json\s*(\{[\s\S]*?\})\s*```', content)
+
+    for block in json_blocks:
+        try:
+            data = json.loads(block)
+            # Verificar que tiene los campos esperados de una propuesta de memoria
+            if isinstance(data, dict) and "filename" in data and "content" in data and "topic_summary" in data:
+                return data
+        except json.JSONDecodeError:
+            continue
+
+    # También buscar JSON inline (sin bloques de código) que parezca una propuesta
+    # Usar un enfoque más flexible: buscar cualquier objeto JSON con los 3 campos requeridos
+    # Buscar patrones que contengan los tres campos clave
+    inline_json_pattern = r'\{(?:[^{}]|(?:\{[^{}]*\}))*"filename"(?:[^{}]|(?:\{[^{}]*\}))*"content"(?:[^{}]|(?:\{[^{}]*\}))*"topic_summary"(?:[^{}]|(?:\{[^{}]*\}))*\}'
+    matches = re.findall(inline_json_pattern, content)
+
+    for match in matches:
+        try:
+            data = json.loads(match)
+            if isinstance(data, dict) and "filename" in data and "content" in data and "topic_summary" in data:
+                return data
+        except json.JSONDecodeError:
+            continue
+
+    # Fallback: búsqueda más simple por los tres campos en cualquier orden
+    simple_pattern = r'\{[^{}]*"filename"[^{}]*\}'
+    potential_matches = re.findall(simple_pattern, content)
+    for match in potential_matches:
+        try:
+            data = json.loads(match)
+            if isinstance(data, dict) and "filename" in data and "content" in data and "topic_summary" in data:
+                return data
+        except json.JSONDecodeError:
+            continue
+
+    return None
+
+
+def save_memory_from_proposal(session_id: str, proposal: dict) -> tuple[bool, str]:
+    """
+    Guarda un archivo de memoria a partir de una propuesta detectada.
+
+    Returns:
+        Tupla (success: bool, message: str)
+    """
+    try:
+        filename = proposal.get("filename", "")
+        content = proposal.get("content", {})
+        topic_summary = proposal.get("topic_summary", "")
+
+        if not filename or not content:
+            return False, "Propuesta incompleta: faltan filename o content"
+
+        # Asegurar extensión .json
+        if not filename.endswith(".json"):
+            filename += ".json"
+
+        # Preparar datos con metadatos
+        from datetime import datetime
+        memory_data = {
+            "metadata": {
+                "saved_at": datetime.now().isoformat(),
+                "session_id": session_id,
+                "topic": topic_summary,
+                "filename": filename
+            },
+            "content": content
+        }
+
+        # Guardar archivo
+        mem_dir = get_memory_dir(session_id)
+        mem_dir.mkdir(parents=True, exist_ok=True)
+        filepath = mem_dir / filename
+
+        with open(filepath, "w", encoding="utf-8") as f:
+            json.dump(memory_data, f, ensure_ascii=False, indent=2)
+
+        return True, f"Archivo de memoria '{filename}' guardado correctamente"
+    except Exception as e:
+        return False, f"Error al guardar: {str(e)}"
+
+
+def load_memory_file(session_id: str, filename: str) -> dict:
+    """Carga un archivo de memoria JSON."""
+    filepath = get_memory_dir(session_id) / filename
+    if not filepath.exists():
+        return {}
+    try:
+        with open(filepath, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def save_memory_file(session_id: str, filename: str, data: dict) -> bool:
+    """Guarda un archivo de memoria JSON."""
+    mem_dir = get_memory_dir(session_id)
+    mem_dir.mkdir(parents=True, exist_ok=True)
+    filepath = mem_dir / filename
+    try:
+        with open(filepath, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        return True
+    except Exception:
+        return False
+
+
+def delete_memory_file(session_id: str, filename: str) -> bool:
+    """Elimina un archivo de memoria."""
+    filepath = get_memory_dir(session_id) / filename
+    if filepath.exists():
+        try:
+            filepath.unlink()
+            return True
+        except Exception:
+            return False
+    return False
+
+
+def list_all_sessions_with_memory() -> List[str]:
+    """Lista todas las sesiones que tienen archivos de memoria."""
+    if not memory_base_dir.exists():
+        return []
+    sessions = []
+    for item in memory_base_dir.iterdir():
+        if item.is_dir() and any(item.glob("*.json")):
+            sessions.append(item.name)
+    return sorted(sessions, reverse=True)
+
+
 # ==================== INICIALIZACIÓN CACHED ====================
 @st.cache_resource
 def init_core_components():
@@ -94,16 +255,22 @@ def init_core_components():
     # 4. Gestor de conversaciones
     conversation_manager = ConversationManager(storage_dir="./data/conversations")
 
-    return ollama_client, retriever, rag_source_manager, conversation_manager
+    # 5. Directorio de archivos de memoria (ya existe global, solo asegurar)
+    global memory_base_dir
+    memory_base_dir = Path("./data/archivos_memoria")
+    memory_base_dir.mkdir(parents=True, exist_ok=True)
+
+    return ollama_client, retriever, rag_source_manager, conversation_manager, memory_base_dir
 
 
 # Cargar componentes core
 try:
-    ollama_client, retriever, rag_source_manager, conversation_manager = init_core_components()
+    ollama_client, retriever, rag_source_manager, conversation_manager, _ = init_core_components()
     core_loaded = True
 except Exception as e:
     core_loaded = False
     st.error(f"Error al inicializar componentes core: {e}")
+    # memory_base_dir ya está definido globalmente
 
 # Cargar agente (depende de retriever y ollama_client)
 @st.cache_resource
@@ -150,6 +317,10 @@ if "show_new_chat_dialog" not in st.session_state:
 if "rag_reindex_triggered" not in st.session_state:
     st.session_state.rag_reindex_triggered = False
 
+# Configuración de ventana de contexto (persistente)
+if "context_window_scale" not in st.session_state:
+    st.session_state.context_window_scale = 0.7
+
 # Asegurar conversación actual al inicio
 if core_loaded and st.session_state.current_conversation_id is None:
     current_conv = conversation_manager.ensure_current_conversation()
@@ -189,7 +360,7 @@ if st.session_state.processing and agent_loaded and core_loaded:
         # Preparar historial para el agente (excluir el último mensaje del usuario que se pasa aparte)
         history = st.session_state.messages[:-1] if st.session_state.messages else []
 
-        # Llamada al agente con historial completo
+        # Llamada al agente con historial completo y escala de ventana de contexto
         try:
             respuesta, metrics = agent.ask(
                 pregunta=last_prompt,
@@ -199,15 +370,23 @@ if st.session_state.processing and agent_loaded and core_loaded:
                 temperature=model_config.get("temperature", 0.3),
                 session_samples=st.session_state.session_samples,
                 session_start_time=st.session_state.session_start_time,
+                context_window_scale=st.session_state.context_window_scale,
+                session_id=st.session_state.current_conversation_id,
             )
         except Exception as e:
             respuesta = f"Ocurrió un error al procesar la solicitud: {e}"
             metrics = {}
 
-        # Guardar respuesta
-        st.session_state.messages.append(
-            {"role": "assistant", "content": respuesta}
-        )
+        # Guardar respuesta del asistente
+        assistant_message = {"role": "assistant", "content": respuesta}
+        st.session_state.messages.append(assistant_message)
+
+        # Manejar propuestas de memoria del agente (nuevo flujo con botones de confirmación)
+        if metrics and metrics.get("tool_results"):
+            memory_proposals = [tr for tr in metrics["tool_results"] if tr.get("type") == "memory_proposal"]
+            if memory_proposals:
+                # Añadir propuestas al mensaje para renderizado en UI
+                assistant_message["memory_proposals"] = [p["data"] for p in memory_proposals]
 
         # Persistir en conversation_manager
         conversation_manager.update_messages(
@@ -341,19 +520,106 @@ with st.sidebar:
 if "active_tab" not in st.session_state:
     st.session_state.active_tab = "chat"
 
-tab_chat, tab_monitor, tab_config = st.tabs([
+tab_chat, tab_monitor, tab_config, tab_memory = st.tabs([
     "💬 Chat Inteligente",
     "📊 Monitor de Recursos",
-    "⚙️ Configuración"
+    "⚙️ Configuración",
+    "🧠 Archivos de Memoria"
 ])
 
 # -------------------- PESTAÑA 1: CHAT INTELIGENTE --------------------
 with tab_chat:
     st.session_state.active_tab = "chat"
     # Mostrar historial
-    for message in st.session_state.messages:
+    for idx, message in enumerate(st.session_state.messages):
         with st.chat_message(message["role"]):
             st.markdown(message["content"])
+
+            # NUEVO FLUJO: Propuestas de memoria del agente (via function calling)
+            if message["role"] == "assistant" and "memory_proposals" in message:
+                for prop_idx, proposal in enumerate(message["memory_proposals"]):
+                    st.divider()
+                    st.success("💾 **Propuesta de memoria lista para guardar**")
+
+                    # Tarjeta visual de la propuesta
+                    with st.container(border=True):
+                        st.markdown(f"**📁 Archivo:** `{proposal['filename']}`")
+                        st.markdown(f"**📝 Tema:** {proposal['topic_summary']}")
+                        with st.expander("📋 Ver contenido completo", expanded=False):
+                            st.json(proposal["content"])
+
+                        # Botones de acción
+                        col_save, col_discard = st.columns(2)
+                        with col_save:
+                            if st.button(
+                                "💾 Guardar memoria",
+                                key=f"save_memory_agent_{idx}_{prop_idx}",
+                                type="primary",
+                                use_container_width=True
+                            ):
+                                success, msg = save_memory_from_proposal(
+                                    st.session_state.current_conversation_id,
+                                    proposal
+                                )
+                                if success:
+                                    st.success(msg)
+                                    # Remover la propuesta del mensaje para no mostrarla de nuevo
+                                    del message["memory_proposals"][prop_idx]
+                                    if not message["memory_proposals"]:
+                                        del message["memory_proposals"]
+                                    st.rerun()
+                                else:
+                                    st.error(msg)
+                        with col_discard:
+                            if st.button(
+                                "❌ Descartar",
+                                key=f"discard_memory_agent_{idx}_{prop_idx}",
+                                use_container_width=True
+                            ):
+                                st.toast("Propuesta de memoria descartada")
+                                del message["memory_proposals"][prop_idx]
+                                if not message["memory_proposals"]:
+                                    del message["memory_proposals"]
+                                st.rerun()
+
+            # FALLBACK DEFENSIVO: Detectar propuestas de memoria en mensajes del asistente
+            # (para cuando el LLM imprime el JSON en lugar de usar la herramienta)
+            if message["role"] == "assistant" and core_loaded:
+                proposal = detect_json_memory_proposal(message["content"])
+                if proposal:
+                    st.divider()
+                    st.info("💡 **Se detectó una propuesta de guardado de memoria** (el modelo mostró el JSON en lugar de usar la herramienta)")
+
+                    # Mostrar preview de la propuesta
+                    with st.expander("📋 Ver propuesta detectada", expanded=True):
+                        st.json(proposal)
+
+                    # Botones de acción
+                    col_save, col_discard = st.columns(2)
+                    with col_save:
+                        if st.button(
+                            "💾 Guardar en memoria estática",
+                            key=f"save_memory_fallback_{idx}",
+                            type="primary",
+                            use_container_width=True
+                        ):
+                            success, msg = save_memory_from_proposal(
+                                st.session_state.current_conversation_id,
+                                proposal
+                            )
+                            if success:
+                                st.success(msg)
+                                st.rerun()
+                            else:
+                                st.error(msg)
+                    with col_discard:
+                        if st.button(
+                            "❌ Descartar",
+                            key=f"discard_memory_fallback_{idx}",
+                            use_container_width=True
+                        ):
+                            st.toast("Propuesta de memoria descartada")
+                            st.rerun()
 
     # Spinner "Pensando..." durante procesamiento
     if st.session_state.processing:
@@ -466,6 +732,35 @@ with tab_config:
             st.session_state.current_conversation_id,
             {"temperature": temperature, "top_k": top_k}
         )
+
+    st.divider()
+
+    # --- Ventana de Contexto ---
+    st.markdown("### 🧠 Ventana de Contexto")
+    st.caption("Controla cuánto historial de conversación se envía al modelo (ahorra tokens y latencia)")
+
+    context_scale = st.slider(
+        "Escala de ventana de contexto",
+        min_value=0.1,
+        max_value=1.0,
+        value=st.session_state.context_window_scale,
+        step=0.1,
+        help="0.1 = Solo últimos 2-4 mensajes (bajo contexto) | 0.7 = Balanceado | 1.0 = Historial completo",
+        key="context_window_slider"
+    )
+
+    # Etiquetas visuales
+    if context_scale <= 0.4:
+        st.markdown("**Nivel:** 🔴 **Bajo (0.1-0.4)** - Solo lo esencial, máxima velocidad")
+    elif context_scale <= 0.7:
+        st.markdown("**Nivel:** 🟡 **Medio (0.5-0.7)** - Balanceado, recomendado")
+    else:
+        st.markdown("**Nivel:** 🟢 **Alto (0.8-1.0)** - Contexto completo, mayor precisión")
+
+    if context_scale != st.session_state.context_window_scale:
+        st.session_state.context_window_scale = context_scale
+        st.success(f"Ventana de contexto actualizada a {context_scale:.1f}")
+        st.rerun()
 
     st.divider()
 
@@ -599,3 +894,122 @@ with tab_config:
             retriever.clear_collection()
             st.success("ChromaDB limpiado")
             st.rerun()
+
+
+# -------------------- PESTAÑA 4: ARCHIVOS DE MEMORIA --------------------
+with tab_memory:
+    st.session_state.active_tab = "memory"
+    st.subheader("🧠 Archivos de Memoria por Sesión")
+    st.caption("Gestiona los archivos JSON de memoria guardados por sesión. El agente puede proponer guardar memorias automáticamente.")
+
+    # Selector de sesión
+    all_sessions = list_all_sessions_with_memory()
+    current_session_id = st.session_state.current_conversation_id
+
+    if current_session_id and current_session_id not in all_sessions:
+        # Añadir sesión actual si no está en la lista (aún no tiene archivos)
+        session_options = [current_session_id] + all_sessions
+    else:
+        session_options = all_sessions
+        if current_session_id and current_session_id not in session_options:
+            session_options.insert(0, current_session_id)
+
+    if not session_options:
+        st.info("ℹ️ No hay sesiones con archivos de memoria aún. El agente creará archivos automáticamente cuando identifique información clave.")
+    else:
+        # Selector de sesión
+        col_sel, col_info = st.columns([3, 1])
+        with col_sel:
+            selected_session = st.selectbox(
+                "Seleccionar sesión",
+                options=session_options,
+                format_func=lambda x: f"{'🟢 ACTUAL - ' if x == current_session_id else '⚪ '}{x}",
+                key="memory_session_selector"
+            )
+        with col_info:
+            if selected_session == current_session_id:
+                st.markdown("`Sesión actual`")
+
+        # Mostrar archivos de memoria de la sesión seleccionada
+        memory_files = list_memory_files(selected_session)
+
+        if memory_files:
+            st.markdown(f"### 📁 Archivos de memoria en `{selected_session}` ({len(memory_files)} archivos)")
+
+            for mem_file in memory_files:
+                with st.expander(f"📄 {mem_file.name}", expanded=False):
+                    mem_data = load_memory_file(selected_session, mem_file.name)
+
+                    # Mostrar contenido formateado
+                    st.json(mem_data)
+
+                    # Botones de acción
+                    col_dl, col_del = st.columns(2)
+                    with col_dl:
+                        # Descargar archivo
+                        st.download_button(
+                            "⬇️ Descargar",
+                            data=json.dumps(mem_data, ensure_ascii=False, indent=2),
+                            file_name=mem_file.name,
+                            mime="application/json",
+                            key=f"dl_{selected_session}_{mem_file.name}",
+                            use_container_width=True
+                        )
+                    with col_del:
+                        if st.button("🗑️ Eliminar", key=f"del_{selected_session}_{mem_file.name}", use_container_width=True):
+                            if delete_memory_file(selected_session, mem_file.name):
+                                st.success(f"Archivo {mem_file.name} eliminado")
+                                st.rerun()
+                            else:
+                                st.error("Error al eliminar")
+        else:
+            st.info(f"La sesión `{selected_session}` no tiene archivos de memoria aún.")
+
+        # Sección para crear archivo de memoria manual
+        st.divider()
+        st.markdown("### ➕ Crear archivo de memoria manual")
+
+        with st.form("create_memory_form", clear_on_submit=True):
+            mem_name = st.text_input(
+                "Nombre del archivo",
+                placeholder="ej: preferencias_usuario, contexto_proyecto, correcciones_tecnicas",
+                help="Se añadirá automáticamente .json"
+            )
+            mem_content = st.text_area(
+                "Contenido (JSON)",
+                placeholder='{"clave": "valor", "lista": [1, 2, 3]}',
+                height=150,
+                help="Ingresa JSON válido"
+            )
+
+            submitted = st.form_submit_button("💾 Guardar archivo de memoria", type="primary", use_container_width=True)
+
+            if submitted and mem_name:
+                # Asegurar extensión .json
+                if not mem_name.endswith(".json"):
+                    mem_name += ".json"
+
+                try:
+                    data = json.loads(mem_content) if mem_content.strip() else {}
+                    target_session = selected_session if selected_session else current_session_id
+
+                    if target_session and save_memory_file(target_session, mem_name, data):
+                        st.success(f"Archivo {mem_name} guardado en sesión {target_session}")
+                        st.rerun()
+                    else:
+                        st.error("Error al guardar. Verifica que hay una sesión seleccionada.")
+                except json.JSONDecodeError as e:
+                    st.error(f"JSON inválido: {e}")
+
+        # Opción para limpiar directorio de memoria de una sesión
+        if memory_files:
+            st.divider()
+            if st.button(f"🗑️ Eliminar TODOS los archivos de memoria de `{selected_session}`", type="secondary", use_container_width=True):
+                mem_dir = get_memory_dir(selected_session)
+                try:
+                    import shutil
+                    shutil.rmtree(mem_dir)
+                    st.success(f"Directorio de memoria de {selected_session} eliminado")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Error: {e}")
