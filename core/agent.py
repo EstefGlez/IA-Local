@@ -51,35 +51,6 @@ def trim_history_by_scale(history: List[dict], context_window_scale: float) -> L
     return history[-keep_count:]
 
 
-def get_save_json_memory_tool() -> Dict[str, Any]:
-    """
-    Retorna la definición de la herramienta save_json_memory para Ollama function calling.
-    TRIGGER LIGERO: Solo recibe suggested_filename y tema. El contenido completo se construye
-    determinísticamente en Python a partir de la última respuesta del asistente.
-    """
-    return {
-        "type": "function",
-        "function": {
-            "name": "save_json_memory",
-            "description": "Propone guardar un archivo JSON de memoria. Solo proporciona nombre de archivo sugerido y tema. El contenido completo (última respuesta del asistente con todo su Markdown) se empaquetará automáticamente en Python. Úsalo cuando identifiques información valiosa que merezca persistir.",
-            "parameters": {
-                "type": "object",
-                "required": ["suggested_filename", "tema"],
-                "properties": {
-                    "suggested_filename": {
-                        "type": "string",
-                        "description": "Nombre descriptivo sugerido (ej: 'preferencias_usuario.json', 'correcciones_tecnicas.json', 'contexto_proyecto.json'). Debe terminar en .json"
-                    },
-                    "tema": {
-                        "type": "string",
-                        "description": "Resumen breve del tema/contenido para metadatos (ej: 'Preferencias de idioma y formato del usuario', 'Correcciones sobre arquitectura del sistema')"
-                    }
-                }
-            }
-        }
-    }
-
-
 def _is_substantive_content(text: str) -> bool:
     """
     Verifica si un texto contiene contenido técnico sustancial (no solo saludos/trivialidades).
@@ -633,35 +604,18 @@ class ConversationalAgent:
         self.retriever = retriever
         self.ollama_client = ollama_client
         self.top_k = top_k
-        # System prompt explícito para Llama 3.2 con instrucciones estrictas de tool calling
+        # System prompt simplificado: solo conversacional, sin tool calling
         self.system_instruction = system_instruction or (
             "Eres un asistente conversacional útil, amable y directo. "
-            "Responde a las preguntas e interacciones del usuario de forma natural, clara y precisa.\n\n"
-            "=== REGLAS ESTRICTAS DE TOOL CALLING (OBLIGATORIO) ===\n"
-            "1. Para guardar memorias, DEBES usar EXCLUSIVAMENTE el mecanismo nativo de function calling (tool calling).\n"
-            "2. NUNCA escribas en tu respuesta de texto plano bloques JSON como:\n"
-            '   {"name": "save_json_memory", "arguments": {"filename": "...", "content": {...}, "topic_summary": "..."}}\n'
-            "   Esto NO funciona y será filtrado por el sistema.\n"
-            "3. Cuando identifiques información técnica valiosa que merezca persistir (código, configuraciones,\n"
-            "   explicaciones detalladas, correcciones, preferencias), invoca la herramienta `save_json_memory`\n"
-            "   mediante el protocolo oficial de tool calling del modelo.\n"
-            "4. El contenido de memoria debe ser DETALLADO y ESTRUCTURADO: incluye descripciones claras,\n"
-            "   bloques de código de ejemplo completos, y contexto suficiente para ser útil en futuras sesiones.\n"
-            "5. Para interacciones casuales (saludos, preguntas simples, charla trivial): NO uses herramientas,\n"
-            "   simplemente responde de forma natural y conversacional.\n"
-            "6. PROHIBIDO invocar `save_json_memory` ante: saludos iniciales (\"Hola\", \"Buenos días\"), "
-            "preguntas exploratorias (\"¿Qué puedes hacer?\", \"¿Hay info disponible?\"), "
-            "frases de inicio de conversación, confirmaciones simples (\"OK\", \"Entendido\"), "
-            "o cualquier interacción que NO contenga contenido técnico generado por ti que valga la pena persistir. "
-            "La herramienta SOLO debe invocarse cuando el usuario ordene EXPLÍCITAMENTE guardar un resumen, "
-            "archivo o contenido técnico YA GENERADO en la conversación (ej: \"Guarda esto en memoria\", "
-            "\"Crea un archivo con esta explicación\", \"Persiste esta configuración\").\n"
+            "Responde a las preguntas e interacciones del usuario de forma natural, clara y precisa. "
+            "Proporciona explicaciones detalladas, código completo cuando sea relevante, "
+            "y contexto suficiente para ser útil. No uses herramientas externas."
         )
         self.rag_source_manager = rag_source_manager
         self._rag_enabled = True  # Flag para fallback graceful
 
-        # Tool definition para function calling
-        self.tools = [get_save_json_memory_tool()]
+        # Sin tools: el guardado de memoria se maneja desde la UI (botón usuario)
+        self.tools = []
 
     def ask(
         self,
@@ -742,142 +696,44 @@ class ConversationalAgent:
         # Añadir historial de conversación recortado (excluyendo el system prompt actual)
         if history:
             for msg in history:
-                if msg["role"] in ("user", "assistant", "tool"):
-                    # Incluir mensajes de tool para mantener el contexto de function calling
+                if msg["role"] in ("user", "assistant"):
                     messages.append(msg)
 
         # Añadir pregunta actual
         messages.append({"role": "user", "content": pregunta})
 
-        # 2. Inferencia con monitoreo de recursos (con soporte para tool calling)
+        # 2. Inferencia con monitoreo de recursos (sin tool calling)
         start_time = time.perf_counter()
 
-        # Loop para manejar múltiples tool calls (máximo 3 iteraciones para evitar bucles infinitos)
-        max_tool_iterations = 3
-        final_response = ""
-        tool_results = []
-
-        for iteration in range(max_tool_iterations):
-            # ==================== DEBUG LOGS ====================
-            print(f"\n{'='*60}")
-            print(f"[DEBUG] Iteración {iteration + 1}/{max_tool_iterations}")
-            print(f"[DEBUG] Tools enviadas: {[t['function']['name'] for t in self.tools]}")
-            print(f"[DEBUG] Mensajes en historial: {len(messages)}")
-            if messages:
-                last_user = next((m for m in reversed(messages) if m['role'] == 'user'), None)
-                if last_user:
-                    print(f"[DEBUG] Último mensaje user: {last_user['content'][:150]}...")
-            print(f"{'='*60}")
-            # ==================== FIN DEBUG LOGS ====================
-
-            if MONITOR_AVAILABLE:
-                with monitor_resources(
-                    interval=0.3,
-                    all_samples=session_samples,
-                    session_start_time=session_start_time,
-                ) as monitor:
-                    response = self.ollama_client.chat(
-                        messages=messages,
-                        temperature=temperature,
-                        num_ctx=num_ctx,
-                        tools=self.tools
-                    )
-                    samples = monitor.stop()
-            else:
+        if MONITOR_AVAILABLE:
+            with monitor_resources(
+                interval=0.3,
+                all_samples=session_samples,
+                session_start_time=session_start_time,
+            ) as monitor:
                 response = self.ollama_client.chat(
                     messages=messages,
                     temperature=temperature,
                     num_ctx=num_ctx,
-                    tools=self.tools
+                    tools=self.tools  # Lista vacía
                 )
-                samples = []
+                samples = monitor.stop()
+        else:
+            response = self.ollama_client.chat(
+                messages=messages,
+                temperature=temperature,
+                num_ctx=num_ctx,
+                tools=self.tools  # Lista vacía
+            )
+            samples = []
 
-            content = response.get("content", "")
-            tool_calls = response.get("tool_calls", None)
+        content = response.get("content", "")
 
-            # ==================== DEBUG LOGS RESPUESTA ====================
-            print(f"[DEBUG] Respuesta Ollama keys: {list(response.keys())}")
-            print(f"[DEBUG] Content (primeros 300 chars): {content[:300] if content else '(vacío)'}")
-            print(f"[DEBUG] Tool calls: {tool_calls}")
-            if tool_calls:
-                for i, tc in enumerate(tool_calls):
-                    fn = tc.get('function', {})
-                    print(f"[DEBUG]   Tool call #{i+1}: name='{fn.get('name')}', args={fn.get('arguments')}")
-            print(f"{'='*60}")
-            # ==================== FIN DEBUG LOGS ====================
-
-            if tool_calls:
-                # El modelo quiere ejecutar herramientas
-                # Añadir la respuesta del asistente con tool_calls al historial
-                messages.append({
-                    "role": "assistant",
-                    "content": content,
-                    "tool_calls": tool_calls
-                })
-
-                # Procesar tool calls: SOLO detectar propuestas de memoria, NO ejecutarlas automáticamente
-                memory_proposals = []
-                for tool_call in tool_calls:
-                    function = tool_call.get("function", {})
-                    func_name = function.get("name")
-                    func_args = function.get("arguments", {})
-
-                    if func_name == "save_json_memory" and session_id:
-                        # TRIGGER LIGERO: Solo recibimos suggested_filename y tema
-                        # Construimos el JSON completo en Python a partir de la respuesta del asistente
-                        suggested_filename = func_args.get("suggested_filename", "")
-                        tema = func_args.get("tema", "")
-
-                        if suggested_filename and tema:
-                            # Usar la respuesta del asistente actual (content) para construir el JSON fiel
-                            # Pasar history para fallback si la respuesta actual es trivial
-                            memory_data = build_memory_json_from_response(
-                                assistant_response=content,
-                                suggested_filename=suggested_filename,
-                                tema=tema,
-                                history=history
-                            )
-                            memory_proposals.append({
-                                "filename": suggested_filename,
-                                "content": memory_data,  # JSON completo con metadata + content
-                                "topic_summary": tema,
-                                "memory_data": memory_data  # Dato completo para guardado posterior
-                            })
-
-                        # Añadir resultado simulado al historial para que el modelo sepa que "se guardó"
-                        messages.append({
-                            "role": "tool",
-                            "tool_name": func_name,
-                            "content": json.dumps({
-                                "success": True,
-                                "message": f"Propuesta de memoria capturada: {suggested_filename}",
-                                "proposal_captured": True
-                            }, ensure_ascii=False)
-                        })
-                    else:
-                        # Tool desconocido o alucinado (ej. spearmanr) - no ejecutar, solo informar
-                        messages.append({
-                            "role": "tool",
-                            "tool_name": func_name,
-                            "content": json.dumps({
-                                "success": False,
-                                "message": f"Herramienta no disponible: {func_name}. Solo 'save_json_memory' está permitida."
-                            }, ensure_ascii=False)
-                        })
-
-                # Si hubo propuestas de memoria, añadirlas a tool_results para devolver a la UI
-                if memory_proposals:
-                    tool_results.extend([{"type": "memory_proposal", "data": p} for p in memory_proposals])
-
-                # Continuar el loop para que el modelo procese los resultados
-                continue
-            else:
-                # No hay tool calls, esta es la respuesta final
-                # Sanitizar y extraer propuestas de memoria escritas en texto plano
-                final_response, extracted_proposals = sanitize_model_response(content)
-                if extracted_proposals:
-                    tool_results.extend([{"type": "memory_proposal", "data": p} for p in extracted_proposals])
-                break
+        # Sanitizar respuesta (eliminar JSON crudo de herramientas alucinadas si las hay)
+        final_response, extracted_proposals = sanitize_model_response(content)
+        tool_results = []
+        if extracted_proposals:
+            tool_results.extend([{"type": "memory_proposal", "data": p} for p in extracted_proposals])
 
         elapsed_time = time.perf_counter() - start_time
 

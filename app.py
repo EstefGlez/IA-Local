@@ -65,7 +65,11 @@ st.markdown(
 from core.ollama_client import OllamaClient
 from core.retriever import RAGRetriever
 from core.document import Document
-from core.agent import ConversationalAgent
+from core.agent import (
+    ConversationalAgent,
+    build_memory_json_from_response,
+    execute_save_json_memory,
+)
 from core.conversation_manager import ConversationManager
 from core.rag_source_manager import RagSourceManager, SourceType
 
@@ -541,11 +545,46 @@ with tab_chat:
         with st.chat_message(message["role"]):
             st.markdown(message["content"])
 
-            # NUEVO FLUJO: Propuestas de memoria del agente (via function calling)
-            if message["role"] == "assistant" and "memory_proposals" in message:
-                for prop_idx, proposal in enumerate(message["memory_proposals"]):
+            # Botón "Guardar como Memoria" para mensajes del asistente
+            if message["role"] == "assistant" and core_loaded:
+                # Estado para mostrar/ocultar la tarjeta de propuesta por mensaje
+                show_proposal_key = f"show_memory_proposal_{idx}"
+                if show_proposal_key not in st.session_state:
+                    st.session_state[show_proposal_key] = False
+
+                col_btn, col_spacer = st.columns([1, 5])
+                with col_btn:
+                    if st.button(
+                        "💾 Guardar como Memoria",
+                        key=f"btn_save_memory_{idx}",
+                        help="Genera una propuesta de memoria a partir de esta respuesta",
+                        use_container_width=True
+                    ):
+                        st.session_state[show_proposal_key] = not st.session_state[show_proposal_key]
+                        st.rerun()
+
+                # Mostrar tarjeta de propuesta si el usuario hizo clic en el botón
+                if st.session_state[show_proposal_key]:
                     st.divider()
                     st.success("💾 **Propuesta de memoria lista para guardar**")
+
+                    # Generar propuesta determinista en Python
+                    history_for_fallback = st.session_state.messages[:idx]  # Historial hasta este mensaje
+                    proposed_filename = f"memoria_{idx}_{int(time.time())}.json"
+                    proposed_topic = "Respuesta del asistente guardada por el usuario"
+
+                    memory_data = build_memory_json_from_response(
+                        assistant_response=message["content"],
+                        suggested_filename=proposed_filename,
+                        tema=proposed_topic,
+                        history=history_for_fallback
+                    )
+
+                    proposal = {
+                        "filename": proposed_filename,
+                        "topic_summary": proposed_topic,
+                        "memory_data": memory_data
+                    }
 
                     # Tarjeta visual de la propuesta
                     with st.container(border=True):
@@ -553,31 +592,26 @@ with tab_chat:
                         edited_filename = st.text_input(
                             "📁 Nombre del archivo",
                             value=proposal['filename'],
-                            key=f"edit_filename_{idx}_{prop_idx}",
+                            key=f"edit_filename_{idx}",
                             help="Puedes modificar el nombre antes de guardar"
                         )
                         st.markdown(f"**📝 Tema:** {proposal['topic_summary']}")
 
                         with st.expander("📋 Ver contenido completo (JSON generado)", expanded=False):
-                            # Mostrar el JSON completo generado por Python (memory_data)
-                            if "memory_data" in proposal:
-                                st.json(proposal["memory_data"])
-                            else:
-                                st.json(proposal["content"])
+                            st.json(proposal["memory_data"])
 
                         # Botones de acción
                         col_save, col_discard = st.columns(2)
                         with col_save:
                             if st.button(
                                 "💾 Guardar memoria",
-                                key=f"save_memory_agent_{idx}_{prop_idx}",
+                                key=f"save_memory_user_{idx}",
                                 type="primary",
                                 use_container_width=True
                             ):
                                 # Actualizar filename en la propuesta si el usuario lo editó
                                 if edited_filename != proposal['filename']:
                                     proposal['filename'] = edited_filename
-                                    # También actualizar en memory_data si existe
                                     if "memory_data" in proposal and "metadata" in proposal["memory_data"]:
                                         proposal["memory_data"]["metadata"]["filename"] = edited_filename
 
@@ -587,23 +621,18 @@ with tab_chat:
                                 )
                                 if success:
                                     st.success(msg)
-                                    # Remover la propuesta del mensaje para no mostrarla de nuevo
-                                    del message["memory_proposals"][prop_idx]
-                                    if not message["memory_proposals"]:
-                                        del message["memory_proposals"]
+                                    st.session_state[show_proposal_key] = False
                                     st.rerun()
                                 else:
                                     st.error(msg)
                         with col_discard:
                             if st.button(
                                 "❌ Descartar",
-                                key=f"discard_memory_agent_{idx}_{prop_idx}",
+                                key=f"discard_memory_user_{idx}",
                                 use_container_width=True
                             ):
                                 st.toast("Propuesta de memoria descartada")
-                                del message["memory_proposals"][prop_idx]
-                                if not message["memory_proposals"]:
-                                    del message["memory_proposals"]
+                                st.session_state[show_proposal_key] = False
                                 st.rerun()
 
             # FALLBACK DEFENSIVO: Detectar propuestas de memoria en mensajes del asistente
