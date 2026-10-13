@@ -16,6 +16,7 @@
 3. Construir interfaz Streamlit (app.py)
 4. Implementar `ResourceMonitor` con psutil
 5. Conectar monitor al asistente y visualizar con matplotlib/seaborn
+6. ✅ **Tool search_saved_memories implementada** (core/agent.py) - lectura de memorias bajo demanda vía tool calling
 
 ## Decisiones importantes
 - **Vector DB**: ChromaDB (persistente en `data/chroma/`)
@@ -24,6 +25,7 @@
 - **RAG Source**: Especificaciones Techbox desde URL GitHub raw + Obsidian (source_type)
 - **Interfaz**: Streamlit (una app, dos pestañas)
 - **Agent params**: top_k=3, temperature=0.3 (factual), system_instruction anti-alucinación
+- **Memorias**: Guardado vía UI (botón "Guardar como Memoria"), lectura vía tool calling `search_saved_memories`
 
 ## Errores a evitar
 - No asumir que Ollama está instalado - verificar con `check_connection()` antes de usar
