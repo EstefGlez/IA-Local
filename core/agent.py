@@ -1,3 +1,4 @@
+import ast
 import json
 import re
 import time
@@ -53,25 +54,23 @@ def trim_history_by_scale(history: List[dict], context_window_scale: float) -> L
 def get_save_json_memory_tool() -> Dict[str, Any]:
     """
     Retorna la definición de la herramienta save_json_memory para Ollama function calling.
+    TRIGGER LIGERO: Solo recibe suggested_filename y tema. El contenido completo se construye
+    determinísticamente en Python a partir de la última respuesta del asistente.
     """
     return {
         "type": "function",
         "function": {
             "name": "save_json_memory",
-            "description": "Guarda un archivo JSON de memoria en ./data/archivos_memoria/{session_id}/ con metadatos (fecha, session_id, tema y contenido). Úsalo cuando el usuario confirme que quiere guardar información importante (preferencias, correcciones, contexto de proyecto, etc.).",
+            "description": "Propone guardar un archivo JSON de memoria. Solo proporciona nombre de archivo sugerido y tema. El contenido completo (última respuesta del asistente con todo su Markdown) se empaquetará automáticamente en Python. Úsalo cuando identifiques información valiosa que merezca persistir.",
             "parameters": {
                 "type": "object",
-                "required": ["filename", "content", "topic_summary"],
+                "required": ["suggested_filename", "tema"],
                 "properties": {
-                    "filename": {
+                    "suggested_filename": {
                         "type": "string",
-                        "description": "Nombre descriptivo del archivo (ej: 'preferencias_usuario.json', 'correcciones_tecnicas.json', 'contexto_proyecto.json'). Debe terminar en .json"
+                        "description": "Nombre descriptivo sugerido (ej: 'preferencias_usuario.json', 'correcciones_tecnicas.json', 'contexto_proyecto.json'). Debe terminar en .json"
                     },
-                    "content": {
-                        "type": "object",
-                        "description": "Contenido JSON a guardar (diccionario con la información a persistir)"
-                    },
-                    "topic_summary": {
+                    "tema": {
                         "type": "string",
                         "description": "Resumen breve del tema/contenido para metadatos (ej: 'Preferencias de idioma y formato del usuario', 'Correcciones sobre arquitectura del sistema')"
                     }
@@ -81,15 +80,47 @@ def get_save_json_memory_tool() -> Dict[str, Any]:
     }
 
 
-def execute_save_json_memory(session_id: str, filename: str, content: dict | str, topic_summary: str) -> dict:
+def build_memory_json_from_response(assistant_response: str, suggested_filename: str, tema: str) -> dict:
     """
-    Ejecuta la herramienta save_json_memory: guarda físicamente el archivo JSON con metadatos.
+    Construye el JSON de memoria de forma determinista a partir de la última respuesta
+    completa del asistente, preservando TODO el Markdown (explicaciones, bloques de código, etc.)
+
+    Args:
+        assistant_response: Texto Markdown completo de la última respuesta del asistente
+        suggested_filename: Nombre de archivo sugerido por el modelo
+        tema: Tema/resumen breve del contenido
+
+    Returns:
+        Diccionario con la estructura completa de memoria lista para guardar
+    """
+    from datetime import datetime
+
+    # Asegurar extensión .json
+    if not suggested_filename.endswith(".json"):
+        suggested_filename += ".json"
+
+    # Estructura fiel: empaquetar todo el Markdown en content.respuesta_completa
+    memory_data = {
+        "metadata": {
+            "saved_at": datetime.now().isoformat(),
+            "filename": suggested_filename,
+            "topic": tema
+        },
+        "content": {
+            "respuesta_completa": assistant_response
+        }
+    }
+
+    return memory_data
+
+
+def execute_save_json_memory(session_id: str, memory_data: dict) -> dict:
+    """
+    Ejecuta el guardado físico del archivo de memoria ya construido.
 
     Args:
         session_id: ID de la sesión actual
-        filename: Nombre del archivo (debe terminar en .json)
-        content: Diccionario con el contenido a guardar, o string JSON a parsear automáticamente
-        topic_summary: Resumen del tema para metadatos
+        memory_data: Diccionario completo con metadata y content (generado por build_memory_json_from_response)
 
     Returns:
         Diccionario con resultado de la operación
@@ -99,33 +130,14 @@ def execute_save_json_memory(session_id: str, filename: str, content: dict | str
         memory_dir = Path("./data/archivos_memoria") / session_id
         memory_dir.mkdir(parents=True, exist_ok=True)
 
-        # Asegurar extensión .json
+        # Obtener filename de metadata
+        filename = memory_data.get("metadata", {}).get("filename", "memoria.json")
         if not filename.endswith(".json"):
             filename += ".json"
 
         filepath = memory_dir / filename
 
-        # Si content es un string, intentar parsearlo como JSON
-        parsed_content = content
-        if isinstance(content, str):
-            try:
-                parsed_content = json.loads(content)
-            except json.JSONDecodeError:
-                # Si no es JSON válido, mantenerlo como string
-                parsed_content = {"raw_content": content}
-
-        # Preparar datos con metadatos
-        memory_data = {
-            "metadata": {
-                "saved_at": datetime.now().isoformat(),
-                "session_id": session_id,
-                "topic": topic_summary,
-                "filename": filename
-            },
-            "content": parsed_content
-        }
-
-        # Guardar archivo
+        # Guardar archivo directamente (memory_data ya viene completo y validado)
         with open(filepath, "w", encoding="utf-8") as f:
             json.dump(memory_data, f, ensure_ascii=False, indent=2)
 
@@ -140,6 +152,147 @@ def execute_save_json_memory(session_id: str, filename: str, content: dict | str
             "message": f"Error al guardar archivo de memoria: {str(e)}",
             "filepath": None
         }
+
+
+def _extract_balanced_json(text: str, start_idx: int = 0) -> Optional[str]:
+    """
+    Extrae un objeto JSON balanceado (con llaves anidadas) desde start_idx.
+
+    Args:
+        text: Texto completo
+        start_idx: Índice donde empieza el '{' inicial
+
+    Returns:
+        String con el JSON balanceado o None si no se encuentra
+    """
+    if start_idx >= len(text) or text[start_idx] != '{':
+        return None
+
+    depth = 0
+    in_string = False
+    string_char = None
+    escape = False
+
+    for i in range(start_idx, len(text)):
+        ch = text[i]
+
+        if escape:
+            escape = False
+            continue
+
+        if ch == '\\':
+            escape = True
+            continue
+
+        if not in_string:
+            if ch in ('"', "'"):
+                in_string = True
+                string_char = ch
+            elif ch == '{':
+                depth += 1
+            elif ch == '}':
+                depth -= 1
+                if depth == 0:
+                    return text[start_idx:i+1]
+        else:
+            if ch == string_char:
+                in_string = False
+                string_char = None
+
+    return None
+
+
+def _try_parse_json_fallback(text: str) -> Optional[dict]:
+    """
+    Intenta parsear JSON con varios mecanismos de respaldo tolerantes a errores.
+
+    Estrategias (en orden):
+    1. json.loads() estándar
+    2. Limpieza de comillas simples -> dobles (solo donde sea seguro)
+    3. ast.literal_eval() para diccionarios estilo Python
+    4. Limpieza agresiva de sintaxis JSON común
+
+    Args:
+        text: String que debería contener un objeto JSON/dict
+
+    Returns:
+        Diccionario parseado o None si todas las estrategias fallan
+    """
+    if not text or not text.strip():
+        return None
+
+    text = text.strip()
+
+    # Estrategia 1: JSON estándar
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+
+    # Estrategia 2: Reemplazar comillas simples por dobles (cuidadosamente)
+    # Solo reemplazar comillas simples que parezcan delimitadores de string, no contenido
+    def fix_single_quotes(s: str) -> str:
+        result = []
+        in_double = False
+        in_single = False
+        escape = False
+
+        for i, ch in enumerate(s):
+            if escape:
+                result.append(ch)
+                escape = False
+                continue
+
+            if ch == '\\':
+                escape = True
+                result.append(ch)
+                continue
+
+            if ch == '"' and not in_single:
+                in_double = not in_double
+                result.append(ch)
+            elif ch == "'" and not in_double:
+                in_single = not in_single
+                result.append('"')  # Convertir a comilla doble
+            else:
+                result.append(ch)
+
+        return ''.join(result)
+
+    try:
+        fixed = fix_single_quotes(text)
+        return json.loads(fixed)
+    except json.JSONDecodeError:
+        pass
+
+    # Estrategia 3: ast.literal_eval para formato Python dict
+    try:
+        # ast.literal_eval acepta comillas simples y dobles
+        result = ast.literal_eval(text)
+        if isinstance(result, dict):
+            return result
+    except (ValueError, SyntaxError):
+        pass
+
+    # Estrategia 4: Limpieza agresiva - eliminar trailing commas, fix True/False/None
+    def aggressive_clean(s: str) -> str:
+        # Eliminar comas finales antes de } o ]
+        s = re.sub(r',\s*([}\]])', r'\1', s)
+        # Convertir True/False/None a true/false/null
+        s = re.sub(r'\bTrue\b', 'true', s)
+        s = re.sub(r'\bFalse\b', 'false', s)
+        s = re.sub(r'\bNone\b', 'null', s)
+        # Comillas simples a dobles (versión simple)
+        s = fix_single_quotes(s)
+        return s
+
+    try:
+        cleaned = aggressive_clean(text)
+        return json.loads(cleaned)
+    except json.JSONDecodeError:
+        pass
+
+    return None
 
 
 def sanitize_model_response(content: str) -> tuple[str, list[dict]]:
@@ -182,18 +335,65 @@ def sanitize_model_response(content: str) -> tuple[str, list[dict]]:
     # ============================================================
     memory_proposals = []
 
-    # Patrón para detectar save_json_memory en bloques de código o inline
-    # Captura el JSON completo de la propuesta
-    save_memory_pattern = r'\{\s*"name"\s*:\s*"save_json_memory"\s*,\s*"(?:arguments|parameters)"\s*:\s*(\{[\s\S]*?\})\s*\}'
+    # Función para extraer propuestas de save_json_memory de un texto
+    def extract_save_memory_proposals(text: str, remove: bool = True) -> str:
+        """
+        Busca y extrae todas las propuestas de save_json_memory en el texto.
+        Si remove=True, las elimina del texto y devuelve el texto limpio.
+        """
+        result_parts = []
+        last_end = 0
+        i = 0
 
-    def extract_and_remove_save_memory(match):
-        """Extrae la propuesta de memoria y la remueve del texto"""
-        try:
-            args_json = match.group(1)
-            args = json.loads(args_json)
+        while i < len(text):
+            # Buscar "name": "save_json_memory" o 'name': 'save_json_memory'
+            name_match = re.search(r'[\'"]name[\'"]\s*:\s*[\'"]save_json_memory[\'"]', text[i:])
+            if not name_match:
+                break
+
+            abs_start = i + name_match.start()
+
+            # Buscar hacia atrás el inicio del objeto JSON completo
+            obj_start = text.rfind('{', 0, abs_start)
+            if obj_start == -1:
+                i = abs_start + 1
+                continue
+
+            # Extraer JSON balanceado
+            full_json = _extract_balanced_json(text, obj_start)
+            if not full_json:
+                i = abs_start + 1
+                continue
+
+            # Verificar que tenga arguments/parameters
+            args_match = re.search(r'[\'"](?:arguments|parameters)[\'"]\s*:\s*(\{)', full_json)
+            if not args_match:
+                i = abs_start + 1
+                continue
+
+            args_start = args_match.start(1)
+            args_json = _extract_balanced_json(full_json, args_start)
+            if not args_json:
+                i = abs_start + 1
+                continue
+
+            # Parsear con tolerancia a errores
+            args = _try_parse_json_fallback(args_json)
+            if args is None:
+                i = abs_start + 1
+                continue
+
             filename = args.get("filename", "")
             content_data = args.get("content", {})
             topic_summary = args.get("topic_summary", "")
+
+            # Asegurar que content_data sea un dict limpio
+            if isinstance(content_data, str):
+                parsed = _try_parse_json_fallback(content_data)
+                if parsed is not None:
+                    content_data = parsed
+                else:
+                    content_data = {"raw_content": content_data}
 
             if filename and content_data and topic_summary:
                 memory_proposals.append({
@@ -201,9 +401,18 @@ def sanitize_model_response(content: str) -> tuple[str, list[dict]]:
                     "content": content_data,
                     "topic_summary": topic_summary
                 })
-        except (json.JSONDecodeError, KeyError):
-            pass
-        return ""  # Remover del texto
+
+            # Si remove, saltar este JSON en el resultado
+            if remove:
+                result_parts.append(text[last_end:obj_start])
+                last_end = obj_start + len(full_json)
+
+            i = obj_start + len(full_json)
+
+        if remove:
+            result_parts.append(text[last_end:])
+            return ''.join(result_parts)
+        return text
 
     # Aplicar extracción en bloques de código
     def process_code_block(match):
@@ -211,15 +420,21 @@ def sanitize_model_response(content: str) -> tuple[str, list[dict]]:
         code_content = match.group(2)
 
         # Buscar y extraer save_json_memory en este bloque
-        extracted = re.sub(save_memory_pattern, extract_and_remove_save_memory, code_content, flags=re.DOTALL)
+        extracted = extract_save_memory_proposals(code_content, remove=True)
 
         # Si el bloque quedó vacío o solo tiene whitespace, eliminarlo
         if not extracted.strip():
             return ""
 
         # Si no era save_json_memory, verificar si es otra tool inválida
-        if '"name"' in code_content and '"arguments"' in code_content:
-            tool_name_match = re.search(r'"name"\s*:\s*"([^"]+)"', code_content)
+        # Detectar tanto comillas simples como dobles
+        has_name_double = '"name"' in code_content
+        has_name_single = "'name'" in code_content
+        has_args_double = '"arguments"' in code_content
+        has_args_single = "'arguments'" in code_content
+        has_tool_pattern = (has_name_double or has_name_single) and (has_args_double or has_args_single)
+        if has_tool_pattern:
+            tool_name_match = re.search(r'[\'"]name[\'"]\s*:\s*[\'"]([^\'"]+)[\'"]', code_content)
             if tool_name_match and tool_name_match.group(1) not in valid_tools:
                 if is_code_explanation or has_valid_code_blocks:
                     return ""  # Eliminar silenciosamente
@@ -235,42 +450,13 @@ def sanitize_model_response(content: str) -> tuple[str, list[dict]]:
         flags=re.IGNORECASE | re.DOTALL
     )
 
-    # También buscar y extraer JSON inline de save_json_memory
-    inline_save_memory_pattern = r'\{\s*"name"\s*:\s*"save_json_memory"\s*,\s*"(?:arguments|parameters)"\s*:\s*\{[\s\S]*?\}\s*\}'
-
-    def extract_inline_save_memory(match):
-        try:
-            full_json = match.group(0)
-            # Extraer solo la parte de arguments/parameters
-            args_match = re.search(r'"(?:arguments|parameters)"\s*:\s*(\{[\s\S]*?\})\s*\}', full_json)
-            if args_match:
-                args_json = args_match.group(1)
-                args = json.loads(args_json)
-                filename = args.get("filename", "")
-                content_data = args.get("content", {})
-                topic_summary = args.get("topic_summary", "")
-
-                if filename and content_data and topic_summary:
-                    memory_proposals.append({
-                        "filename": filename,
-                        "content": content_data,
-                        "topic_summary": topic_summary
-                    })
-        except (json.JSONDecodeError, KeyError):
-            pass
-        return ""  # Remover del texto
-
-    cleaned = re.sub(
-        inline_save_memory_pattern,
-        extract_inline_save_memory,
-        cleaned,
-        flags=re.DOTALL
-    )
+    # También buscar y extraer JSON inline de save_json_memory (fuera de bloques de código)
+    cleaned = extract_save_memory_proposals(cleaned, remove=True)
 
     # ============================================================
     # PASO 2: Limpiar otras invocaciones de herramientas inválidas
     # ============================================================
-    function_call_pattern = r'\{\s*"name"\s*:\s*"([^"]+)"\s*,\s*"(?:arguments|parameters)"\s*:\s*\{[^}]*\}\s*\}'
+    function_call_pattern = r'\{\s*[\'"]name[\'"]\s*:\s*[\'"]([^\'"]+)[\'"]\s*,\s*[\'"](?:arguments|parameters)[\'"]\s*:\s*\{[^}]*\}\s*\}'
 
     def replace_inline_function_call(match):
         tool_name = match.group(1)
@@ -532,16 +718,23 @@ class ConversationalAgent:
                     func_args = function.get("arguments", {})
 
                     if func_name == "save_json_memory" and session_id:
-                        # Capturar la propuesta de memoria para devolverla a la UI
-                        filename = func_args.get("filename", "")
-                        content_data = func_args.get("content", {})
-                        topic_summary = func_args.get("topic_summary", "")
+                        # TRIGGER LIGERO: Solo recibimos suggested_filename y tema
+                        # Construimos el JSON completo en Python a partir de la respuesta del asistente
+                        suggested_filename = func_args.get("suggested_filename", "")
+                        tema = func_args.get("tema", "")
 
-                        if filename and content_data and topic_summary:
+                        if suggested_filename and tema:
+                            # Usar la respuesta del asistente actual (content) para construir el JSON fiel
+                            memory_data = build_memory_json_from_response(
+                                assistant_response=content,
+                                suggested_filename=suggested_filename,
+                                tema=tema
+                            )
                             memory_proposals.append({
-                                "filename": filename,
-                                "content": content_data,
-                                "topic_summary": topic_summary
+                                "filename": suggested_filename,
+                                "content": memory_data,  # JSON completo con metadata + content
+                                "topic_summary": tema,
+                                "memory_data": memory_data  # Dato completo para guardado posterior
                             })
 
                         # Añadir resultado simulado al historial para que el modelo sepa que "se guardó"
@@ -550,7 +743,7 @@ class ConversationalAgent:
                             "tool_name": func_name,
                             "content": json.dumps({
                                 "success": True,
-                                "message": f"Propuesta de memoria capturada: {filename}",
+                                "message": f"Propuesta de memoria capturada: {suggested_filename}",
                                 "proposal_captured": True
                             }, ensure_ascii=False)
                         })

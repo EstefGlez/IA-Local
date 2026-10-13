@@ -142,33 +142,39 @@ def detect_json_memory_proposal(content: str) -> Optional[dict]:
 def save_memory_from_proposal(session_id: str, proposal: dict) -> tuple[bool, str]:
     """
     Guarda un archivo de memoria a partir de una propuesta detectada.
+    Ahora espera que la propuesta contenga 'memory_data' (JSON completo ya construido en Python)
+    o los campos legacy filename/content/topic_summary.
 
     Returns:
         Tupla (success: bool, message: str)
     """
     try:
-        filename = proposal.get("filename", "")
-        content = proposal.get("content", {})
-        topic_summary = proposal.get("topic_summary", "")
+        # Nuevo formato: memory_data ya viene completo desde agent.py
+        if "memory_data" in proposal and proposal["memory_data"]:
+            memory_data = proposal["memory_data"]
+            filename = memory_data.get("metadata", {}).get("filename", "memoria.json")
+        else:
+            # Formato legacy (fallback defensivo)
+            filename = proposal.get("filename", "")
+            content = proposal.get("content", {})
+            topic_summary = proposal.get("topic_summary", "")
 
-        if not filename or not content:
-            return False, "Propuesta incompleta: faltan filename o content"
+            if not filename or not content:
+                return False, "Propuesta incompleta: faltan filename o content"
 
-        # Asegurar extensión .json
-        if not filename.endswith(".json"):
-            filename += ".json"
+            if not filename.endswith(".json"):
+                filename += ".json"
 
-        # Preparar datos con metadatos
-        from datetime import datetime
-        memory_data = {
-            "metadata": {
-                "saved_at": datetime.now().isoformat(),
-                "session_id": session_id,
-                "topic": topic_summary,
-                "filename": filename
-            },
-            "content": content
-        }
+            from datetime import datetime
+            memory_data = {
+                "metadata": {
+                    "saved_at": datetime.now().isoformat(),
+                    "session_id": session_id,
+                    "topic": topic_summary,
+                    "filename": filename
+                },
+                "content": content
+            }
 
         # Guardar archivo
         mem_dir = get_memory_dir(session_id)
@@ -543,10 +549,21 @@ with tab_chat:
 
                     # Tarjeta visual de la propuesta
                     with st.container(border=True):
-                        st.markdown(f"**📁 Archivo:** `{proposal['filename']}`")
+                        # Nombre de archivo EDITABLE por el usuario
+                        edited_filename = st.text_input(
+                            "📁 Nombre del archivo",
+                            value=proposal['filename'],
+                            key=f"edit_filename_{idx}_{prop_idx}",
+                            help="Puedes modificar el nombre antes de guardar"
+                        )
                         st.markdown(f"**📝 Tema:** {proposal['topic_summary']}")
-                        with st.expander("📋 Ver contenido completo", expanded=False):
-                            st.json(proposal["content"])
+
+                        with st.expander("📋 Ver contenido completo (JSON generado)", expanded=False):
+                            # Mostrar el JSON completo generado por Python (memory_data)
+                            if "memory_data" in proposal:
+                                st.json(proposal["memory_data"])
+                            else:
+                                st.json(proposal["content"])
 
                         # Botones de acción
                         col_save, col_discard = st.columns(2)
@@ -557,6 +574,13 @@ with tab_chat:
                                 type="primary",
                                 use_container_width=True
                             ):
+                                # Actualizar filename en la propuesta si el usuario lo editó
+                                if edited_filename != proposal['filename']:
+                                    proposal['filename'] = edited_filename
+                                    # También actualizar en memory_data si existe
+                                    if "memory_data" in proposal and "metadata" in proposal["memory_data"]:
+                                        proposal["memory_data"]["metadata"]["filename"] = edited_filename
+
                                 success, msg = save_memory_from_proposal(
                                     st.session_state.current_conversation_id,
                                     proposal
