@@ -223,6 +223,132 @@ def execute_save_json_memory(session_id: str, memory_data: dict) -> dict:
         }
 
 
+def search_saved_memories(session_id: str, query: str) -> dict:
+    """
+    Busca en los archivos de memoria JSON de una sesión usando una query de texto.
+
+    Busca coincidencias en:
+    - metadata.topic (tema de la memoria)
+    - metadata.filename (nombre de archivo)
+    - content.respuesta_completa (contenido completo de la respuesta)
+
+    Args:
+        session_id: ID de la sesión para buscar sus memorias
+        query: Texto a buscar (case-insensitive, búsqueda parcial)
+
+    Returns:
+        Diccionario con resultados de la búsqueda
+    """
+    try:
+        memory_dir = Path("./data/archivos_memoria") / session_id
+
+        if not memory_dir.exists():
+            return {
+                "success": True,
+                "results": [],
+                "message": f"No hay directorio de memoria para sesión {session_id}"
+            }
+
+        query_lower = query.lower().strip()
+        if not query_lower:
+            return {
+                "success": True,
+                "results": [],
+                "message": "Query vacía - no se buscó nada"
+            }
+
+        results = []
+        memory_files = sorted(memory_dir.glob("*.json"))
+
+        for mem_file in memory_files:
+            try:
+                with open(mem_file, "r", encoding="utf-8") as f:
+                    mem_data = json.load(f)
+
+                # Extraer campos buscables
+                metadata = mem_data.get("metadata", {})
+                content = mem_data.get("content", {})
+
+                topic = metadata.get("topic", "").lower()
+                filename = metadata.get("filename", "").lower()
+                respuesta_completa = content.get("respuesta_completa", "").lower()
+
+                # Buscar coincidencia en campos
+                match_score = 0
+                matched_fields = []
+
+                if query_lower in topic:
+                    match_score += 3
+                    matched_fields.append("topic")
+                if query_lower in filename:
+                    match_score += 2
+                    matched_fields.append("filename")
+                if query_lower in respuesta_completa:
+                    match_score += 1
+                    matched_fields.append("content")
+
+                if match_score > 0:
+                    # Crear snippet del contenido (primeros 300 chars)
+                    snippet = content.get("respuesta_completa", "")[:300]
+                    if len(content.get("respuesta_completa", "")) > 300:
+                        snippet += "..."
+
+                    results.append({
+                        "filename": metadata.get("filename", mem_file.name),
+                        "topic": metadata.get("topic", "Sin tema"),
+                        "saved_at": metadata.get("saved_at", "Desconocido"),
+                        "match_score": match_score,
+                        "matched_fields": matched_fields,
+                        "snippet": snippet
+                    })
+
+            except Exception as e:
+                # Saltar archivos corruptos
+                continue
+
+        # Ordenar por score descendente
+        results.sort(key=lambda x: x["match_score"], reverse=True)
+
+        return {
+            "success": True,
+            "results": results,
+            "message": f"Encontrados {len(results)} archivo(s) de memoria relevantes"
+        }
+
+    except Exception as e:
+        return {
+            "success": False,
+            "results": [],
+            "message": f"Error al buscar memorias: {str(e)}"
+        }
+
+
+def get_search_memories_tool() -> dict:
+    """
+    Devuelve la definición de la herramienta search_saved_memories para tool calling.
+
+    Returns:
+        Diccionario con la especificación de la herramienta compatible con Ollama
+    """
+    return {
+        "type": "function",
+        "function": {
+            "name": "search_saved_memories",
+            "description": "Busca en los archivos de memoria guardados de la sesión actual. Úsala SOLO cuando el usuario pregunte por información guardada previamente, pida revisar memorias anteriores, o quiera consultar algo que se haya guardado como memoria.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Término de búsqueda (ej: 'pandas', 'filtros', 'preferencias usuario', 'configuración')"
+                    }
+                },
+                "required": ["query"]
+            }
+        }
+    }
+
+
 def _extract_balanced_json(text: str, start_idx: int = 0) -> Optional[str]:
     """
     Extrae un objeto JSON balanceado (con llaves anidadas) desde start_idx.
@@ -604,18 +730,29 @@ class ConversationalAgent:
         self.retriever = retriever
         self.ollama_client = ollama_client
         self.top_k = top_k
-        # System prompt simplificado: solo conversacional, sin tool calling
+        # System prompt con herramienta de lectura de memorias
         self.system_instruction = system_instruction or (
             "Eres un asistente conversacional útil, amable y directo. "
             "Responde a las preguntas e interacciones del usuario de forma natural, clara y precisa. "
             "Proporciona explicaciones detalladas, código completo cuando sea relevante, "
-            "y contexto suficiente para ser útil. No uses herramientas externas."
+            "y contexto suficiente para ser útil.\n\n"
+            "### Herramienta disponible: search_saved_memories\n"
+            "Tienes acceso a una herramienta para buscar en los archivos de memoria guardados de la sesión actual. "
+            "Úsala ÚNICAMENTE cuando el usuario:\n"
+            "- Pregunte por información guardada previamente\n"
+            "- Pida revisar o consultar memorias anteriores\n"
+            "- Quiera recuperar algo que se haya guardado como memoria\n\n"
+            "NO la uses para:\n"
+            "- Saludos, despedidas o conversaciones casuales\n"
+            "- Preguntas de conocimiento general que no requieren memoria guardada\n"
+            "- Responder basándote en tu conocimiento general\n\n"
+            "Cuando uses la herramienta, integra los resultados de forma natural en tu respuesta."
         )
         self.rag_source_manager = rag_source_manager
         self._rag_enabled = True  # Flag para fallback graceful
 
-        # Sin tools: el guardado de memoria se maneja desde la UI (botón usuario)
-        self.tools = []
+        # Tool de lectura de memorias (guardado se maneja desde UI)
+        self.tools = [get_search_memories_tool()]
 
     def ask(
         self,
@@ -702,9 +839,52 @@ class ConversationalAgent:
         # Añadir pregunta actual
         messages.append({"role": "user", "content": pregunta})
 
-        # 2. Inferencia con monitoreo de recursos (sin tool calling)
+        # 2. Inferencia con monitoreo de recursos y tool calling
         start_time = time.perf_counter()
+        tool_results = []
 
+        # Función auxiliar para ejecutar tool calling
+        def execute_tool_calls(response_msg: dict, current_session_id: str) -> list:
+            """Ejecuta las tool calls del modelo y devuelve lista de resultados."""
+            results = []
+            tool_calls = response_msg.get("tool_calls", [])
+
+            for tool_call in tool_calls:
+                if not isinstance(tool_call, dict):
+                    continue
+
+                function = tool_call.get("function", {})
+                name = function.get("name")
+                arguments = function.get("arguments", {})
+
+                if name == "search_saved_memories" and current_session_id:
+                    query = arguments.get("query", "")
+                    if query:
+                        result = search_saved_memories(current_session_id, query)
+                        results.append({
+                            "type": "search_memories",
+                            "success": result.get("success", False),
+                            "message": result.get("message", ""),
+                            "data": result
+                        })
+                    else:
+                        results.append({
+                            "type": "search_memories",
+                            "success": False,
+                            "message": "Query vacío en tool call",
+                            "data": {"results": []}
+                        })
+                else:
+                    results.append({
+                        "type": "unknown_tool",
+                        "success": False,
+                        "message": f"Herramienta desconocida: {name}",
+                        "data": {}
+                    })
+
+            return results
+
+        # Primera llamada al modelo (con tools disponibles)
         if MONITOR_AVAILABLE:
             with monitor_resources(
                 interval=0.3,
@@ -715,7 +895,7 @@ class ConversationalAgent:
                     messages=messages,
                     temperature=temperature,
                     num_ctx=num_ctx,
-                    tools=self.tools  # Lista vacía
+                    tools=self.tools
                 )
                 samples = monitor.stop()
         else:
@@ -723,15 +903,60 @@ class ConversationalAgent:
                 messages=messages,
                 temperature=temperature,
                 num_ctx=num_ctx,
-                tools=self.tools  # Lista vacía
+                tools=self.tools
             )
             samples = []
 
         content = response.get("content", "")
+        tool_calls = response.get("tool_calls", [])
+
+        # Si el modelo invocó tools, ejecutarlas
+        if tool_calls:
+            executed_results = execute_tool_calls(response, session_id)
+            tool_results.extend(executed_results)
+
+            # Si hubo resultados de búsqueda de memorias, hacer segunda llamada con los resultados
+            if executed_results:
+                # Añadir respuesta del modelo (con tool_calls) al historial
+                messages.append(response)
+
+                # Añadir resultados de tools como mensajes de tool
+                for tool_result in executed_results:
+                    if tool_result["type"] == "search_memories":
+                        tool_content = json.dumps(tool_result["data"], ensure_ascii=False)
+                        messages.append({
+                            "role": "tool",
+                            "content": tool_content,
+                            "name": "search_saved_memories"
+                        })
+
+                # Segunda llamada al modelo con resultados de tools
+                if MONITOR_AVAILABLE:
+                    with monitor_resources(
+                        interval=0.3,
+                        all_samples=session_samples,
+                        session_start_time=session_start_time,
+                    ) as monitor:
+                        response = self.ollama_client.chat(
+                            messages=messages,
+                            temperature=temperature,
+                            num_ctx=num_ctx,
+                            tools=self.tools
+                        )
+                        more_samples = monitor.stop()
+                        samples.extend(more_samples)
+                else:
+                    response = self.ollama_client.chat(
+                        messages=messages,
+                        temperature=temperature,
+                        num_ctx=num_ctx,
+                        tools=self.tools
+                    )
+
+                content = response.get("content", "")
 
         # Sanitizar respuesta (eliminar JSON crudo de herramientas alucinadas si las hay)
         final_response, extracted_proposals = sanitize_model_response(content)
-        tool_results = []
         if extracted_proposals:
             tool_results.extend([{"type": "memory_proposal", "data": p} for p in extracted_proposals])
 
