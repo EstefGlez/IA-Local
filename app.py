@@ -517,11 +517,16 @@ with st.sidebar:
 if "active_tab" not in st.session_state:
     st.session_state.active_tab = "chat"
 
-tab_chat, tab_monitor, tab_config, tab_memory = st.tabs([
+# Inicializar pending_context si no existe
+if "pending_context" not in st.session_state:
+    st.session_state.pending_context = None
+
+tab_chat, tab_monitor, tab_config, tab_memory, tab_search = st.tabs([
     "💬 Chat Inteligente",
     "📊 Monitor de Recursos",
     "⚙️ Configuración",
-    "🧠 Archivos de Memoria"
+    "🧠 Archivos de Memoria",
+    "🔍 Buscar en Historial"
 ])
 
 # -------------------- PESTAÑA 1: CHAT INTELIGENTE --------------------
@@ -766,6 +771,16 @@ with tab_chat:
         - **`/memory <término>`**: Busca en tus archivos de memoria guardados e inyecta el contenido completo
         - **`/rag <consulta>`**: Busca en la base de conocimiento documental (RAG) e inyecta el contexto relevante
         """)
+
+    # ==================== CONTEXTO PENDIENTE DE BÚSQUEDA ====================
+    if st.session_state.pending_context:
+        with st.container(border=True):
+            st.markdown("**📌 Contexto de Búsqueda Seleccionado**")
+            st.caption("Este texto se usará como punto de partida para tu próximo mensaje. Escríbelo abajo y envíalo.")
+            st.markdown(f"> {st.session_state.pending_context[:300]}{'...' if len(st.session_state.pending_context) > 300 else ''}")
+            if st.button("❌ Eliminar contexto", key="clear_pending_context", use_container_width=True, disabled=is_processing):
+                st.session_state.pending_context = None
+                st.rerun()
 
     # Chat input fijo al fondo (renderizado dentro de la pestaña Chat)
     prompt = st.chat_input(
@@ -1171,3 +1186,53 @@ with tab_memory:
                     st.rerun()
                 except Exception as e:
                     st.error(f"Error: {e}")
+
+# -------------------- PESTAÑA 5: BUSCAR EN HISTORIAL --------------------
+with tab_search:
+    st.session_state.active_tab = "search"
+    st.subheader("🔍 Buscar en Historial de Conversación")
+
+    if not st.session_state.messages:
+        st.info("ℹ️ No hay mensajes en la conversación actual para buscar.")
+    else:
+        st.caption("Búsqueda case-insensitive en todos los mensajes de la conversación actual")
+
+        search_query = st.text_input(
+            "Buscar mensajes...",
+            key="history_search_query",
+            placeholder="Escribe palabras clave para filtrar el historial",
+            disabled=is_processing
+        )
+
+        if search_query:
+            # Filtrado determinista case-insensitive
+            query_lower = search_query.lower()
+            matches = []
+            for idx, message in enumerate(st.session_state.messages):
+                if query_lower in message["content"].lower():
+                    matches.append((idx, message))
+
+            if matches:
+                st.markdown(f"**{len(matches)} resultado(s) encontrado(s):**")
+                for idx, message in matches:
+                    role_icon = "👤" if message["role"] == "user" else "🤖"
+                    role_label = "Usuario" if message["role"] == "user" else "Asistente"
+                    # Resumen: primeras 100 caracteres
+                    preview = message["content"][:100] + ("..." if len(message["content"]) > 100 else "")
+                    with st.expander(f"{role_icon} {role_label}: {preview}", expanded=False):
+                        st.markdown(f"**Rol:** {role_label}")
+                        st.markdown(f"**Índice en historial:** #{idx + 1}")
+                        st.markdown("**Contenido completo:**")
+                        st.markdown(message["content"])
+                        # Botón para guardar como contexto pendiente
+                        if st.button(
+                            "📌 Usar como contexto para próximo mensaje",
+                            key=f"use_context_{idx}",
+                            use_container_width=True,
+                            disabled=is_processing
+                        ):
+                            st.session_state.pending_context = f"[Contexto de búsqueda]\n{message['content']}"
+                            st.success("✅ Contexto guardado. Ve a la pestaña **Chat Inteligente** para usarlo.")
+                            st.rerun()
+            else:
+                st.info(f"No se encontraron coincidencias para: \"{search_query}\"")

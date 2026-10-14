@@ -76,6 +76,24 @@
 - **Diferencia**: Complementa "Eliminar TODOS" que actúa sobre sesión seleccionada; este actúa sobre sesión ACTUAL
 - **Verificación**: `python -m py_compile app.py` ✅
 
+## ✅ Búsqueda determinista en historial de conversación (2026-10-14 - tarde)
+- **Ubicación**: Pestaña Chat, antes del renderizado del historial (líneas 531-577)
+- **Campo**: `st.text_input` con key="chat_search_query", placeholder descriptivo, `disabled=is_processing`
+- **Filtrado**: Case-insensitive estricto sobre `st.session_state.messages`
+- **Resultados**: Expandibles estilo memoria con icono rol, índice, preview 100 chars + contenido completo
+- **Acción**: Botón "📌 Usar este mensaje como contexto" inyecta mensaje como user con etiqueta "[Contexto recuperado de búsqueda]", setea `processing=True`, rerun
+- **Seguridad**: Botones con `disabled=is_processing`
+- **Verificación**: `python -m py_compile app.py` ✅
+
+## ✅ Refactor Búsqueda: Pestaña dedicada + Contexto pendiente (2026-10-14 - tarde)
+- **Nueva pestaña**: "🔍 Buscar en Historial" (tab_search, 5ª pestaña)
+- **Chat tab**: Eliminada búsqueda inline; añadido bloque "📌 Contexto de Búsqueda Seleccionado" arriba del chat_input
+- **pending_context**: Nueva variable session_state para guardar contexto seleccionado sin enviarlo automáticamente
+- **Flujo**: Buscar en pestaña Search → click "Usar como contexto" → guarda en `pending_context` → notifica → usuario va a Chat → ve contexto destacado → escribe prompt → envía (contexto + prompt van juntos)
+- **Botón eliminar**: ❌ "Eliminar contexto" limpia `pending_context`
+- **Seguridad**: Todos los controles con `disabled=is_processing`
+- **Verificación**: `python -m py_compile app.py` ✅
+
 ## Decisiones importantes
 - **Vector DB**: ChromaDB (persistente en `data/chroma/`)
 - **Embeddings**: sentence-transformers (all-MiniLM-L6-v2)
