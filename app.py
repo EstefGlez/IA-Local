@@ -2,6 +2,7 @@
 
 import time
 import json
+import requests
 from pathlib import Path
 import streamlit as st
 
@@ -521,12 +522,13 @@ if "active_tab" not in st.session_state:
 if "pending_context" not in st.session_state:
     st.session_state.pending_context = None
 
-tab_chat, tab_monitor, tab_config, tab_memory, tab_search = st.tabs([
+tab_chat, tab_monitor, tab_config, tab_memory, tab_search, tab_models = st.tabs([
     "💬 Chat Inteligente",
     "📊 Monitor de Recursos",
     "⚙️ Configuración",
     "🧠 Archivos de Memoria",
-    "🔍 Buscar en Historial"
+    "🔍 Buscar en Historial",
+    "⚙️ Modelos y Ollama"
 ])
 
 # -------------------- PESTAÑA 1: CHAT INTELIGENTE --------------------
@@ -1236,3 +1238,133 @@ with tab_search:
                             st.rerun()
             else:
                 st.info(f"No se encontraron coincidencias para: \"{search_query}\"")
+
+
+# -------------------- PESTAÑA 6: MODELOS Y OLLAMA --------------------
+with tab_models:
+    st.session_state.active_tab = "models"
+    st.subheader("⚙️ Modelos y Ollama")
+    st.caption("Gestiona los modelos instalados en Ollama y descarga nuevos desde la librería oficial")
+
+    if not core_loaded:
+        st.error("Componentes core no disponibles. No se puede conectar a Ollama.")
+    else:
+        # --- Modelo Activo ---
+        st.markdown("### 🎯 Modelo Activo")
+
+        # Inicializar current_model en session_state si no existe
+        if "current_model" not in st.session_state:
+            st.session_state.current_model = ollama_client.model
+
+        # Obtener lista de modelos disponibles
+        try:
+            available_models = ollama_client.list_models()
+            if available_models:
+                # Selectbox con modelo actual seleccionado
+                selected_model = st.selectbox(
+                    "Modelo Activo",
+                    options=available_models,
+                    index=available_models.index(st.session_state.current_model) if st.session_state.current_model in available_models else 0,
+                    help="Selecciona el modelo que usará el chat. Cambios surten efecto inmediato.",
+                    disabled=is_processing,
+                    key="model_selector"
+                )
+
+                # Actualizar session_state y cliente si cambió
+                if selected_model != st.session_state.current_model:
+                    st.session_state.current_model = selected_model
+                    ollama_client.model = selected_model
+                    st.success(f"✅ Modelo activo cambiado a: `{selected_model}`")
+                    st.rerun()
+
+                st.caption(f"Modelo actual en uso: **{st.session_state.current_model}**")
+            else:
+                st.warning("⚠️ No hay modelos instalados en Ollama. Descarga uno abajo.")
+        except requests.RequestException as e:
+            st.error(f"❌ Error de conexión con Ollama: {e}")
+            st.info("Asegúrate de que Ollama esté corriendo en `http://localhost:11434`")
+            available_models = []
+
+        st.divider()
+
+        # --- Descargar Nuevo Modelo ---
+        st.markdown("### ⬇️ Descargar Nuevo Modelo")
+        st.caption("Escribe el nombre exacto del modelo de la librería de Ollama (ej: `mistral`, `gemma:2b`, `phi3`, `llama3.1:8b`)")
+
+        col_input, col_btn = st.columns([3, 1])
+        with col_input:
+            model_name = st.text_input(
+                "Nombre del modelo",
+                placeholder="ej: mistral, gemma:2b, phi3, llama3.1:8b...",
+                help="Consulta https://ollama.com/library para la lista completa",
+                disabled=is_processing,
+                key="new_model_name"
+            )
+        with col_btn:
+            download_btn = st.button(
+                "📥 Descargar Modelo",
+                type="primary",
+                use_container_width=True,
+                disabled=is_processing or not model_name.strip(),
+                key="download_model_btn"
+            )
+
+        if download_btn and model_name.strip():
+            model_to_pull = model_name.strip()
+            with st.status(f"Descargando `{model_to_pull}`...", expanded=True) as status:
+                try:
+                    # Usar pull_model con streaming de progreso
+                    for progress in ollama_client.pull_model(model_to_pull):
+                        status_text = progress.get("status", "")
+                        completed = progress.get("completed")
+                        total = progress.get("total")
+                        digest = progress.get("digest")
+
+                        if completed is not None and total is not None and total > 0:
+                            pct = (completed / total) * 100
+                            status.update(label=f"Descargando `{model_to_pull}`: {status_text} ({pct:.1f}%)", state="running")
+                        elif status_text:
+                            status.update(label=f"Descargando `{model_to_pull}`: {status_text}", state="running")
+
+                    status.update(label=f"✅ Modelo `{model_to_pull}` descargado correctamente", state="complete")
+                    st.success(f"¡Modelo `{model_to_pull}` listo para usar!")
+
+                    # Actualizar lista de modelos disponibles
+                    try:
+                        new_models = ollama_client.list_models()
+                        if model_to_pull in new_models and model_to_pull not in available_models:
+                            st.info(f"Nuevo modelo disponible: `{model_to_pull}`")
+                    except Exception:
+                        pass
+
+                except requests.RequestException as e:
+                    status.update(label=f"❌ Error al descargar: {e}", state="error")
+                    st.error(f"Error de conexión: {e}")
+                except Exception as e:
+                    status.update(label=f"❌ Error inesperado: {e}", state="error")
+                    st.error(f"Error: {e}")
+
+        st.divider()
+
+        # --- Estado de Conexión ---
+        st.markdown("### 🔌 Estado de Conexión")
+        col1, col2 = st.columns(2)
+        with col1:
+            if ollama_client.check_connection():
+                st.success("✅ Ollama conectado")
+                st.caption(f"Endpoint: `{ollama_client.base_url}`")
+            else:
+                st.error("❌ Ollama no responde")
+                st.caption("Verifica que Ollama esté corriendo")
+        with col2:
+            if available_models:
+                st.metric("Modelos instalados", len(available_models))
+            else:
+                st.metric("Modelos instalados", 0)
+
+        # Lista completa de modelos (expandible)
+        if available_models:
+            with st.expander("📋 Ver todos los modelos instalados", expanded=False):
+                for m in available_models:
+                    is_active = " 🟢 **ACTIVO**" if m == st.session_state.current_model else ""
+                    st.markdown(f"- `{m}`{is_active}")

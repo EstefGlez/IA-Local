@@ -232,6 +232,57 @@ Responde basándote únicamente en el contexto proporcionado. Si el contexto no 
         data = response.json()
         return [model["name"] for model in data.get("models", [])]
 
+    def pull_model(self, name: str) -> Generator[Dict, None, None]:
+        """
+        Descarga un modelo desde la librería de Ollama.
+        Usa el endpoint /api/pull con streaming para reportar progreso.
+
+        Args:
+            name: Nombre del modelo a descargar (ej: "mistral", "gemma:2b", "phi3")
+
+        Yields:
+            Diccionarios con información de progreso: {"status": str, "digest": str | None, "total": int | None, "completed": int | None}
+            - status: mensaje de estado actual (downloading, verifying, success, etc.)
+            - digest: hash del layer actual
+            - total: bytes totales del layer
+            - completed: bytes descargados hasta ahora
+
+        Raises:
+            requests.RequestException: Si hay error en la petición HTTP
+            ValueError: Si la respuesta no tiene el formato esperado
+        """
+        payload = {"name": name, "stream": True}
+
+        try:
+            response = requests.post(
+                f"{self.base_url}/api/pull",
+                json=payload,
+                timeout=self.timeout,
+                stream=True,
+            )
+            response.raise_for_status()
+
+            for line in response.iter_lines():
+                if not line:
+                    continue
+
+                try:
+                    data = json.loads(line.decode("utf-8"))
+                except json.JSONDecodeError:
+                    continue
+
+                yield {
+                    "status": data.get("status", ""),
+                    "digest": data.get("digest"),
+                    "total": data.get("total"),
+                    "completed": data.get("completed"),
+                }
+
+        except requests.RequestException as e:
+            raise requests.RequestException(f"Error al descargar modelo de Ollama: {e}") from e
+        except json.JSONDecodeError as e:
+            raise ValueError(f"Respuesta no es JSON válido en pull: {e}") from e
+
     def chat_stream(
         self,
         messages: List[Dict[str, str]],
