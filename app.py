@@ -355,6 +355,9 @@ if "streaming_full_response" not in st.session_state:
 if "streaming_metrics" not in st.session_state:
     st.session_state.streaming_metrics = None
 
+# Estado global de bloqueo por procesamiento/streaming (accesible en todas las pestañas y sidebar)
+is_processing = st.session_state.get("streaming_active", False) or st.session_state.get("processing", False)
+
 # ==================== INICIAR STREAMING (antes de renderizar UI) ====================
 # Detectar nuevo prompt para iniciar streaming
 if st.session_state.processing and agent_loaded and core_loaded:
@@ -453,8 +456,11 @@ if core_loaded and not ollama_client.check_connection():
 with st.sidebar:
     st.markdown("### 💬 Conversaciones")
 
+    if is_processing:
+        st.caption("🔒 Interfaz bloqueada durante generación...")
+
     # Botón nuevo chat
-    if st.button("➕ Nuevo Chat", use_container_width=True, type="primary"):
+    if st.button("➕ Nuevo Chat", use_container_width=True, type="primary", disabled=is_processing):
         new_conv = conversation_manager.create_conversation()
         st.session_state.current_conversation_id = new_conv.id
         st.session_state.messages = new_conv.messages
@@ -473,7 +479,8 @@ with st.sidebar:
                     f"{'🟢 ' if is_active else '⚪ '}{conv['title']}",
                     key=f"conv_{conv['id']}",
                     use_container_width=True,
-                    help=f"{conv['message_count']} mensajes · {time.strftime('%d/%m %H:%M', time.localtime(conv['updated_at']))}"
+                    help=f"{conv['message_count']} mensajes · {time.strftime('%d/%m %H:%M', time.localtime(conv['updated_at']))}",
+                    disabled=is_processing
                 ):
                     if not is_active:
                         # Cambiar conversación
@@ -483,7 +490,7 @@ with st.sidebar:
                             st.session_state.messages = loaded_conv.messages
                             st.rerun()
             with col2:
-                if st.button("🗑️", key=f"del_{conv['id']}", help="Eliminar conversación"):
+                if st.button("🗑️", key=f"del_{conv['id']}", help="Eliminar conversación", disabled=is_processing):
                     conversation_manager.delete_conversation(conv["id"])
                     if is_active:
                         # Si borramos la activa, crear nueva
@@ -657,6 +664,10 @@ with tab_chat:
                             st.toast("Propuesta de memoria descartada")
                             st.rerun()
 
+    # Banner visual de bloqueo (solo modo legacy processing, NO streaming que ya tiene spinner)
+    if st.session_state.get("processing", False) and not st.session_state.get("streaming_active", False):
+        st.info("⏳ Procesando respuesta... Por favor espera.")
+
     # ==================== STREAMING EN TIEMPO REAL ====================
     # Si hay streaming activo, ejecutar generador y mostrar en la burbuja del assistant
     # DEBAJO de todos los mensajes del historial (orden cronológico: User -> Assistant)
@@ -759,7 +770,7 @@ with tab_chat:
     # Chat input fijo al fondo (renderizado dentro de la pestaña Chat)
     prompt = st.chat_input(
         "Escribe tu pregunta o usa /memory /rag...",
-        disabled=not (core_loaded and agent_loaded)
+        disabled=not (core_loaded and agent_loaded) or is_processing
     )
 
     if prompt:
@@ -845,14 +856,16 @@ with tab_config:
             "Temperatura",
             min_value=0.0, max_value=1.0, value=0.3, step=0.05,
             help="Controla la creatividad de las respuestas.",
-            key="config_temperature"
+            key="config_temperature",
+            disabled=is_processing
         )
     with col2:
         top_k = st.slider(
             "Top-K (chunks)",
             min_value=1, max_value=10, value=3, step=1,
             help="Número de fragmentos de contexto a recuperar.",
-            key="config_top_k"
+            key="config_top_k",
+            disabled=is_processing
         )
 
     # Guardar config en conversación actual
@@ -875,7 +888,8 @@ with tab_config:
         value=st.session_state.context_window_scale,
         step=0.1,
         help="0.1 = Solo últimos 2-4 mensajes (bajo contexto) | 0.7 = Balanceado | 1.0 = Historial completo",
-        key="context_window_slider"
+        key="context_window_slider",
+        disabled=is_processing
     )
 
     # Etiquetas visuales
@@ -895,7 +909,7 @@ with tab_config:
 
     # --- Fuentes RAG Dinámicas ---
     st.markdown("### 📚 Fuentes RAG Dinámicas")
-    st.caption("Configura hasta 2 fuentes de conocimiento (URLs, archivos locales, carpetas, o GitHub)")
+    st.caption("Configura fuentes de conocimiento (URLs, archivos locales, carpetas, o GitHub)")
 
     # Mostrar fuentes actuales
     sources = rag_source_manager.list_sources() if core_loaded else []
@@ -912,11 +926,11 @@ with tab_config:
                 if source.last_indexed_at:
                     st.caption(f"Última indexación: {time.strftime('%d/%m %H:%M', time.localtime(source.last_indexed_at))}")
             with col2:
-                if st.button("🔄 Re-indexar", key=f"reidx_{source.id}", use_container_width=True):
+                if st.button("🔄 Re-indexar", key=f"reidx_{source.id}", use_container_width=True, disabled=is_processing):
                     st.session_state.rag_reindex_triggered = True
                     st.rerun()
             with col3:
-                if st.button("🗑️ Eliminar", key=f"delsrc_{source.id}", use_container_width=True):
+                if st.button("🗑️ Eliminar", key=f"delsrc_{source.id}", use_container_width=True, disabled=is_processing):
                     rag_source_manager.remove_source(source.id)
                     st.rerun()
     else:
@@ -955,7 +969,7 @@ with tab_config:
             with col_b2:
                 st.caption("Ej: estefglez/techbox-mx/main/docs")
 
-        submitted = st.form_submit_button("➕ Añadir fuente", type="primary", use_container_width=True)
+        submitted = st.form_submit_button("➕ Añadir fuente", type="primary", use_container_width=True, disabled=is_processing)
 
         if submitted and new_name and new_location:
             # Validación básica de URL antes de añadir
@@ -1012,7 +1026,7 @@ with tab_config:
         st.warning("⚠️ ChromaDB vacío - añade fuentes y re-indexa")
 
     # Botón limpiar todo
-    if st.button("🗑️ Limpiar ChromaDB y reiniciar", type="secondary", use_container_width=True):
+    if st.button("🗑️ Limpiar ChromaDB y reiniciar", type="secondary", use_container_width=True, disabled=is_processing):
         if core_loaded:
             retriever.clear_collection()
             st.success("ChromaDB limpiado")
@@ -1047,7 +1061,8 @@ with tab_memory:
                 "Seleccionar sesión",
                 options=session_options,
                 format_func=lambda x: f"{'🟢 ACTUAL - ' if x == current_session_id else '⚪ '}{x}",
-                key="memory_session_selector"
+                key="memory_session_selector",
+                disabled=is_processing
             )
         with col_info:
             if selected_session == current_session_id:
@@ -1079,7 +1094,7 @@ with tab_memory:
                             use_container_width=True
                         )
                     with col_del:
-                        if st.button("🗑️ Eliminar", key=f"del_{selected_session}_{mem_file.name}", use_container_width=True):
+                        if st.button("🗑️ Eliminar", key=f"del_{selected_session}_{mem_file.name}", use_container_width=True, disabled=is_processing):
                             if delete_memory_file(selected_session, mem_file.name):
                                 st.success(f"Archivo {mem_file.name} eliminado")
                                 st.rerun()
@@ -1105,7 +1120,7 @@ with tab_memory:
                 help="Ingresa JSON válido"
             )
 
-            submitted = st.form_submit_button("💾 Guardar archivo de memoria", type="primary", use_container_width=True)
+            submitted = st.form_submit_button("💾 Guardar archivo de memoria", type="primary", use_container_width=True, disabled=is_processing)
 
             if submitted and mem_name:
                 # Asegurar extensión .json
@@ -1127,7 +1142,7 @@ with tab_memory:
         # Opción para limpiar directorio de memoria de una sesión
         if memory_files:
             st.divider()
-            if st.button(f"🗑️ Eliminar TODOS los archivos de memoria de `{selected_session}`", type="secondary", use_container_width=True):
+            if st.button(f"🗑️ Eliminar TODOS los archivos de memoria de `{selected_session}`", type="secondary", use_container_width=True, disabled=is_processing):
                 mem_dir = get_memory_dir(selected_session)
                 try:
                     import shutil

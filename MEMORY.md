@@ -48,6 +48,27 @@
 - **Spinner legacy condicionado**: Solo modo ask() (no streaming)
 - **Compilación verificada**: python -m py_compile app.py ✅
 
+## ✅ Bloqueo seguridad y concurrencia (2026-10-14 - tarde)
+- **Variable unificada**: `is_processing = streaming_active or processing`
+- **chat_input deshabilitado**: `disabled=... or is_processing`
+- **Sidebar botones deshabilitados**: Nuevo Chat, seleccionar/borrar conversación
+- **Indicadores visuales**: Banner legacy "⏳ Procesando..." + sidebar caption "🔒 Interfaz bloqueada..."
+- **Auto-limpieza**: Se libera automáticamente al terminar (rerun con flags reset)
+- **Compilación verificada**: python -m py_compile app.py ✅
+
+## ✅ Bloqueo global extendido a todas las pestañas (2026-10-14 - tarde)
+- **Variable global única**: `is_processing` definida antes de tabs, accesible en todo app.py
+- **Pestaña Config**: Sliders (temp, top-k, contexto) + botones RAG + form submit + limpiar ChromaDB
+- **Pestaña Memoria**: Selectbox sesión + botones eliminar + form submit crear + eliminar todos
+- **No bloqueado**: download_button (solo lectura), Monitor (solo métricas)
+- **Consistencia estricta**: Una sola bandera controla toda la UI interactiva
+- **Compilación verificada**: python -m py_compile app.py ✅
+
+## ✅ Fix NameError is_processing (2026-10-14 - tarde)
+- **Problema**: Variable `is_processing` definida después del sidebar (línea ~518) pero usada en sidebar (línea ~456)
+- **Solución**: Movida la definición a línea 359, justo después de inicializar `st.session_state` y antes del sidebar
+- **Verificación**: `python -m py_compile app.py` ✅
+
 ## Decisiones importantes
 - **Vector DB**: ChromaDB (persistente en `data/chroma/`)
 - **Embeddings**: sentence-transformers (all-MiniLM-L6-v2)
