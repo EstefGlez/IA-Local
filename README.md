@@ -1,183 +1,308 @@
-# 🤖 Asistente IA Local con Monitor de Recursos
+# 🤖 IA-Local: Asistente RAG Local + Monitor de Recursos + Gestión de Modelos
 
-Un solo proyecto base que cubre dos entregas de clase distintas:
-- **POO (Programación Orientada a Objetos):** Un asistente de dudas que corre 100% local, usando un modelo de lenguaje cuantizado (tipo Llama) y RAG (Retrieval-Augmented Generation) para responder con base en documentos reales.
-- **Sistemas Operativos:** Un panel de monitoreo de recursos ("mini administrador de tareas") que mide en tiempo real cuánto CPU/RAM consume el proceso del asistente mientras responde preguntas.
+[![Python](https://img.shields.io/badge/Python-3.10+-blue.svg)](https://www.python.org/downloads/)
+[![Streamlit](https://img.shields.io/badge/Streamlit-1.38+-FF4B4B.svg)](https://streamlit.io)
+[![Ollama](https://img.shields.io/badge/Ollama-Local%20LLM-000000.svg)](https://ollama.ai)
+[![ChromaDB](https://img.shields.io/badge/ChromaDB-Vector%20DB-8A2BE2.svg)](https://www.trychroma.com)
+[![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+[![Status](https://img.shields.io/badge/Status-MVP%20Release-brightgreen.svg)](#)
 
-## 🎯 Objetivo del Proyecto
+---
 
-Crear un asistente de inteligencia artificial totalmente local que:
-1. Responda preguntas basándose exclusivamente en un documento de especificaciones proporcionado (no en conocimiento general del modelo)
-2. Monitoree y visualize en tiempo real el consumo de recursos (CPU/RAM) del propio proceso del asistente
+## 🎯 Descripción General
 
-**Nota de integridad académica:** Ambas entregas comparten el mismo código base (el asistente es "el proceso" que el monitor vigila). Se debe confirmar con ambos profesores que reutilizar el mismo proyecto, visto desde dos ángulos distintos, es aceptable en la escuela antes de entregarlo así.
+**IA-Local** es un asistente de inteligencia artificial **100% local** que combina:
+
+- 🧠 **RAG (Retrieval-Augmented Generation)** — Responde preguntas basándose **exclusivamente** en tus documentos (no en conocimiento general del modelo)
+- 💬 **Chat con streaming token-por-token** — Respuestas en tiempo real vía Ollama (`/api/chat` con `stream=true`)
+- 🧠 **Memoria persistente** — Guarda y recupera conocimiento entre sesiones (archivos JSON por conversación)
+- 🔍 **Búsqueda en historial** — Busca en conversaciones pasadas e inyecta contexto al chat actual
+- ⚙️ **Gestión dinámica de modelos Ollama** — Lista, selecciona y descarga modelos (`llama3.2`, `mistral`, `gemma`, etc.) con progreso en vivo
+- 📊 **Monitor de recursos en tiempo real** — Mide CPU/RAM del proceso asistente con `psutil` + gráficas `matplotlib`/`seaborn`
+
+> **Una sola app Streamlit, 6 pestañas funcionales, cero dependencias en la nube.**
+
+---
 
 ## 🔧 Stack Tecnológico
 
-| Componente | Tecnología |
-|------------|------------|
-| Modelo cuantizado | Llama 3.2 (3B o 1B) vía Ollama |
-| RAG / embeddings | `chromadb` + `sentence-transformers` |
-| Backend del asistente | Python, estructurado en clases (POO) |
-| Fuente de RAG | Doc de especificaciones de Techbox, por URL |
-| Monitoreo de recursos | `psutil` |
-| Procesamiento de métricas | `pandas` (siguiendo técnicas de la bóveda de Obsidian) |
-| Visualización | Streamlit + `matplotlib`/`seaborn` |
-| Interfaz | Streamlit (una sola app, ambas partes) |
+| Componente | Tecnología | Versión |
+|------------|------------|---------|
+| **Modelo LLM** | Llama 3.2 (3B/1B), Mistral, Gemma, etc. vía **Ollama** | Latest |
+| **RAG / Embeddings** | `chromadb` + `sentence-transformers` (all-MiniLM-L6-v2) | 0.4.x / 2.2.x |
+| **Backend Asistente** | Python, arquitectura POO (clases desacopladas) | 3.10+ |
+| **Fuente RAG** | Documentos locales / URLs (GitHub raw, Obsidian, PDFs, etc.) | — |
+| **Memoria** | Archivos JSON por sesión + índice en ChromaDB opcional | — |
+| **Monitoreo Recursos** | `psutil` (muestreo 0.5s) + `pandas` (agregaciones/rolling) | 5.9.x / 2.1.x |
+| **Visualización** | Streamlit + `matplotlib`/`seaborn` | 1.38+ / 3.8+ |
+| **Interfaz** | Streamlit (single-page app, 6 tabs) | 1.38+ |
+| **Limpieza Texto** | `core.utils.text_cleaner` (HTML, entidades, normalización) | Custom |
+
+---
 
 ## 📁 Estructura del Proyecto
 
 ```
-AsistenteIA-Local/
-├── .env                 # Variables de entorno (NO versionar)
-├── .env.example         # Plantilla para variables de entorno
-├── .gitignore           # Archivos excluidos de Git
-├── README.md            # Este archivo
-├── requirements.txt     # Dependencias de Python
+IA-Local/
+├── .env                    # Variables de entorno (NO versionar)
+├── .env.example            # Plantilla para variables de entorno
+├── .gitignore              # Archivos excluidos de Git
+├── README.md               # Este archivo
+├── requirements.txt        # Dependencias de Python
+├── app.py                  # Interfaz principal Streamlit (6 tabs)
 ├── core/
-│   ├── __init__.py      # Paquete core
-│   ├── document.py      # Clase Document
-│   ├── retriever.py     # Clase RAGRetriever
-│   ├── ollama_client.py # Clase OllamaClient (pendiente)
-│   └── agent.py         # Clase ConversationalAgent (pendiente)
-├── monitor/
-│   └── resource_monitor.py # Clase ResourceMonitor (pendiente)
-├── app.py               # Interfaz principal (Streamlit) (pendiente)
-└── data/
-    └── chroma/          # Base de datos vectorial ChromaDB (excluida de Git)
+│   ├── __init__.py         # Paquete core
+│   ├── document.py         # Clase Document (carga, chunking, metadatos)
+│   ├── retriever.py        # Clase RAGRetriever (ChromaDB + embeddings)
+│   ├── ollama_client.py    # Clase OllamaClient (chat, stream, pull, tags)
+│   ├── agent.py            # Clase ConversationalAgent (orquesta RAG + LLM + memoria)
+│   ├── conversation_manager.py # Gestión de sesiones/historial de chat
+│   ├── rag_source_manager.py   # Gestión de fuentes RAG (URL, local, Obsidian)
+│   └── utils/
+│       ├── monitor.py      # ResourceMonitor (psutil sampling + pandas)
+│       └── text_cleaner.py # Limpieza HTML, entidades, normalización
+├── data/
+│   ├── chroma/             # Base vectorial ChromaDB (persistente, gitignored)
+│   ├── archivos_memoria/   # Memorias JSON por sesión (gitignored)
+│   └── conversations/      # Historial de chats por sesión (gitignored)
+├── specs/                  # Especificaciones técnicas por feature (SDD)
+└── tests/                  # (pendiente) Tests unitarios e integración
 ```
 
-## 📋 Características Implementadas ✅
+---
 
-- [x] **Clase `Document`**: Carga contenido desde URL o archivo local, lo divide en chunks con traslape
-- [x] **Clase `RAGRetriever`**: Usa ChromaDB como base vectorial y sentence-transformers para embeddings
-- [x] **Pruebas funcionales**: Verificación de que la búsqueda encuentra información específica (ej. tiempos de envío: 24-72 horas)
-- [x] **Archivos de configuración**: `.env`, `.env.example`, `.gitignore` preparados para desarrollo y GitHub
+## ✨ Características del MVP Release
 
-## 🚧 Próximos Steps (Según Plan de Implementación)
+### 1. 💬 **Chat con Streaming en Tiempo Real**
+- **Endpoint**: `OllamaClient.chat_stream()` → `POST /api/chat` con `stream=true`
+- **UI**: `st.write_stream` renderiza token-por-token en burbuja assistant
+- **Spinners contextuales**: `🧠 Procesando memoria...` | `🔍 Consultando base RAG...` | `✨ Generando respuesta...`
+- **Compatibilidad dual**: `ask()` legacy (tests/métricas) + `ask_stream()` (UI)
 
-1. [ ] Instalar Ollama y descargar el modelo `llama3.2:3b`
-2. [ ] Confirmar que Ollama responde correctamente desde la terminal
-3. [ ] Implementar `OllamaClient` y probar llamadas simples
-4. [ ] Implementar `ConversationalAgent` (unir RAG + modelo)
-5. [ ] Construir interfaz de chat en Streamlit (Parte A funcionando)
-6. [ ] Implementar `ResourceMonitor` de forma aislada
-7. [ ] Conectar el monitor para que mida al asistente mientras responde
-8. [ ] Procesar muestras con pandas y graficarlas con matplotlib/seaborn
-9. [ ] Agregar la vista del monitor a la misma app de Streamlit
+### 2. 🧠 **Memoria Persistente por Conversación**
+- **Guardado**: Botón `💾 Guardar como Memoria` en cada respuesta del asistente
+- **Formato**: JSON estructurado (`metadata` + `content`) en `data/archivos_memoria/{session_id}/`
+- **Recuperación**: Comando explícito `/memory <query>` — búsqueda determinista en archivos JSON
+- **Inyección**: Contenido completo inyectado como contexto en el prompt
+- **Purga granular**: Botón `🗑️ Purgar memorias de conversación ACTUAL` (solo sesión activa)
+
+### 3. 🔍 **RAG Determinista con Comandos Explícitos**
+- **Comando**: `/rag <query>` — búsqueda semántica en ChromaDB
+- **Sin tool-calling automático**: Flujo 100% determinista, controlado por el usuario
+- **Fuentes escalables**: Sin límite de fuentes simultáneas (antes: máx. 2)
+- **Gestión de fuentes**: Pestaña Config → agregar/eliminar/reindexar fuentes (URL, local, Obsidian)
+
+### 4. 🔍 **Búsqueda en Historial + Contexto Pendiente**
+- **Pestaña dedicada**: `🔍 Buscar en Historial` (5ª pestaña)
+- **Filtrado**: Case-insensitive sobre `st.session_state.messages`
+- **Resultados**: Expandibles con preview 100 chars + contenido completo
+- **Acción**: `📌 Usar este mensaje como contexto` → guarda en `pending_context`
+- **Flujo**: Buscar → Seleccionar contexto → Ir a Chat → Ver banner "📌 Contexto de Búsqueda Seleccionado" → Enviar prompt (contexto + prompt van juntos)
+
+### 5. ⚙️ **Gestión Dinámica de Modelos Ollama** *(Nueva pestaña 6ª)*
+- **Conexión**: Badge de estado + `GET /api/tags` para listar modelos instalados
+- **Modelo Activo**: Selectbox que muta `ollama_client.model` y persiste en `session_state['current_model']`
+- **Descarga interactiva**: `st.text_input` + botón `Descargar Modelo` → `POST /api/pull` con `st.status` mostrando:
+  - Estado: `downloading` / `verifying` / `success`
+  - Progreso: `% completado` + `bytes descargados / total`
+- **Manejo de errores**: `requests.RequestException` capturado y mostrado en UI
+
+### 6. 📊 **Monitor de Recursos en Tiempo Real**
+- **ResourceMonitor**: Clase en `core.utils.monitor` usando `psutil.Process()`
+- **Muestreo**: Cada 0.5s (configurable via `MONITOR_INTERVAL`) durante la generación
+- **Métricas**: % CPU, RAM (MB), timestamps
+- **Procesamiento**: `pandas.DataFrame` → agregaciones (mean, max, std) + `rolling()` suavizado
+- **Visualización**: Gráficas `matplotlib`/`seaborn` embebidas en Streamlit (pestaña Monitor)
+
+---
+
+## 📋 Pestañas de la Interfaz (6 Tabs)
+
+| # | Pestaña | Icono | Funcionalidad Principal |
+|---|---------|-------|------------------------|
+| 1 | **Chat** | 💬 | Chat principal con streaming, memoria, RAG, búsqueda |
+| 2 | **Monitor** | 📊 | Gráficas CPU/RAM en tiempo real del proceso asistente |
+| 3 | **Config** | ⚙️ | Parámetros (temp, top-k, contexto), fuentes RAG, limpiar ChromaDB |
+| 4 | **Memoria** | 🧠 | Ver/eliminar memorias por sesión, purge actual, crear manual |
+| 5 | **Buscar** | 🔍 | Búsqueda en historial + selección de contexto pendiente |
+| 6 | **Modelos** | ⚙️ | Estado Ollama, modelo activo, descarga de modelos con progreso |
+
+> **Seguridad**: Todas las pestañas respetan `is_processing` — botones/inputs deshabilitados mientras el asistente genera respuesta.
+
+---
 
 ## 🛠️ Instalación y Configuración
 
 ### Prerrequisitos
-- Python 3.8+
-- Git (opcional, para versionado)
-- Acceso a internet para descargar dependencias y modelo
+- **Python 3.10+**
+- **Git** (opcional, para versionado)
+- **Ollama instalado y corriendo** — [Descargar desde ollama.ai](https://ollama.ai)
+- Acceso a internet para descargar dependencias y modelos
 
 ### Pasos de instalación
 
-1. **Clonar o descargar el repositorio**
-   ```bash
-   # Si clonas desde GitHub:
-   git clone <url-del-repositorio>
-   cd AsistenteIA-Local
-   ```
-
-2. **Crear entorno virtual (recomendado)**
-   ```bash
-   python -m venv venv
-   # En Windows:
-   venv\Scripts\activate
-   # En macOS/Linux:
-   source venv/bin/activate
-   ```
-
-3. **Instalar dependencias**
-   ```bash
-   pip install -r requirements.txt
-   ```
-
-4. **Configurar variables de entorno**
-   ```bash
-   # Copiar la plantilla y ajustar si es necesario
-   cp .env.example .env
-   # Editar .env si necesitas cambiar valores por defecto
-   ```
-
-5. **Instalar Ollama y el modelo**
-   ```bash
-   # Instalar Ollama desde https://ollama.ai
-   # Luego descargar el modelo recomendado:
-   ollama pull llama3.2:3b
-   # Alternativa para PCs con poca RAM:
-   # ollama pull llama3.2:1b
-   ```
-
-6. **Verificar que Ollama esté funcionando**
-   ```bash
-   ollama run llama3.2:3b "¿Qué es la inteligencia artificial?"
-   # Debería responder basado en el conocimiento general del modelo
-   ```
-
-## 🧪 Ejecución de Pruebas
-
-Ya existe un script de prueba para verificar el funcionamiento del RAG:
-
 ```bash
-python test_retriever.py
-```
+# 1. Clonar repositorio
+git clone https://github.com/EstefGlez/IA-Local.git
+cd IA-Local
 
-Este script:
-1. Descarga el documento de especificaciones de Techbox desde GitHub
-2. Lo procesa y lo indexa en ChromaDB
-3. Realiza una búsqueda de prueba: "¿cuánto tarda el envío?"
-4. Verifica que encuentre la respuesta esperada: "Entre 24 y 72 horas dentro de México"
+# 2. Crear entorno virtual
+python -m venv venv
+# Windows:
+venv\Scripts\activate
+# macOS/Linux:
+source venv/bin/activate
 
-## 📖 Uso Futuro (Una vez completada la implementación)
+# 3. Instalar dependencias
+pip install -r requirements.txt
 
-Una vez que se completen todos los componentes:
+# 4. Configurar variables de entorno (VER SECCIÓN SEGURIDAD ABAJO)
+cp .env.example .env
+# Editar .env si necesitas cambiar valores por defecto
 
-```bash
-# Activar entorno virtual si no está activo
-# venv\Scripts\activate  # Windows
-# source venv/bin/activate  # macOS/Linux
+# 5. Instalar y verificar Ollama
+ollama pull llama3.2:3b          # Modelo recomendado (3B params)
+# ollama pull llama3.2:1b        # Alternativa para RAM limitada
+ollama run llama3.2:3b "test"    # Verificar que responde
 
-# Ejecutar la aplicación Streamlit
+# 6. Ejecutar la aplicación
 streamlit run app.py
 ```
 
-La aplicación tendrá dos secciones/pestañas:
-1. **Asistente IA**: Interfaz de chat para hacer preguntas sobre el documento de Techbox
-2. **Monitor de Recursos**: Gráficas en tiempo real mostrando CPU/RAM consumidas por el proceso de Ollama/asistente
+> ⚠️ **IMPORTANTE**: Ollama debe estar **corriendo en background** (`ollama serve` o simplemente haber ejecutado `ollama run` una vez) antes de lanzar `streamlit run app.py`. La app se conecta a `http://localhost:11434` por defecto.
 
-## 📚 Fuentes de Conocimiento
+---
 
-El asistente actualmente está configurado para usar como única fuente de conocimiento:
-- [Especificaciones de Techbox](https://raw.githubusercontent.com/EstefGlez/techbox-mx/refs/heads/main/especificaciones-techbox.md)
-  (documento de ejemplo para la demo - puede reemplazarse por cualquier otro documento URL)
+## 🔐 Seguridad y Configuración de Entorno
 
-## 💡 Ideas Futuras (Post-Entrega)
+### Archivo `.env` (NO versionar — está en `.gitignore`)
 
-- Integrar el asistente como una cuarta opción descargable en el SDK de chatbot (`SDK-Chatbot`)
-- Permitir cargar múltiples documentos de especificaciones
-- Añadir soporte para diferentes modelos de Llama (3B, 1B, 7B, etc.)
-- Implementar historial de conversaciones
-- Exportar reportes de monitoreo de recursos
-- Soporte para documentos locales además de URLs
+```bash
+# Copiar plantilla y personalizar
+cp .env.example .env
+```
 
-## 👥 Contribuir
+### Variables de entorno disponibles
 
-Este es un proyecto académico, pero si deseas sugerir mejoras:
+| Variable | Descripción | Valor por defecto |
+|----------|-------------|-------------------|
+| `OLLAMA_HOST` | URL del servidor Ollama | `http://localhost:11434` |
+| `OLLAMA_MODEL` | Modelo activo por defecto | `llama3.2:3b` |
+| `EMBEDDING_MODEL` | Modelo de embeddings (sentence-transformers) | `all-MiniLM-L6-v2` |
+| `CHROMA_PATH` | Ruta persistente ChromaDB | `./data/chroma` |
+| `COLLECTION_NAME` | Nombre colección vectorial | `documents` |
+| `STREAMLIT_SERVER_PORT` | Puerto Streamlit | `8501` |
+| `STREAMLIT_SERVER_ADDRESS` | Bind address Streamlit | `localhost` |
+| `STREAMLIT_SERVER_HEADLESS` | Modo headless | `true` |
+| `CHUNK_SIZE` | Tamaño de chunks para RAG | `500` |
+| `CHUNK_OVERLAP` | Traslape entre chunks | `50` |
+| `TOP_K_RESULTS` | Resultados top-k en búsqueda RAG | `3` |
+| `MONITOR_INTERVAL` | Intervalo muestreo recursos (seg) | `0.5` |
+| `MAX_SAMPLES` | Máximo muestras en memoria | `1000` |
+| `LOG_LEVEL` | Nivel de logging | `INFO` |
 
-1. Haz un fork del repositorio
-2. Crea una rama para tu feature (`git checkout -b feature/AmazingFeature`)
-3. Haz commit de tus cambios (`git commit -m 'Add some AmazingFeature'`)
-4. Push a la rama (`git push origin feature/AmazingFeature`)
-5. Abre un Pull Request
+> ✅ **Buena práctica**: Nunca commitees `.env`. Usa `.env.example` como plantilla compartida. Cada desarrollador/entorno crea su propio `.env` local.
+
+---
+
+## 🧪 Comandos de Chat Disponibles
+
+| Comando | Descripción | Ejemplo |
+|---------|-------------|---------|
+| `/memory <query>` | Busca en memorias guardadas e inyecta contexto | `/memory envíos internacionales` |
+| `/rag <query>` | Consulta RAG sobre documentos indexados | `/rag políticas de devolución` |
+| *(texto libre)* | Chat normal con streaming (usa RAG automático si hay fuentes) | `¿Cuánto tarda el envío?` |
+
+> **Nota**: El RAG automático se activa solo si hay fuentes indexadas. Los comandos `/memory` y `/rag` son **explícitos y deterministas** — el usuario decide cuándo usar cada fuente.
+
+---
+
+## 🏗️ Arquitectura - Flujo de Datos
+
+```
+┌─────────────────┐     ┌──────────────────┐     ┌─────────────────┐
+│   Usuario       │────▶│  Conversational  │────▶│  OllamaClient   │
+│   (Streamlit)   │     │  Agent           │     │  (HTTP → Ollama)│
+└─────────────────┘     └────────┬─────────┘     └─────────────────┘
+                                 │
+              ┌──────────────────┼──────────────────┐
+              ▼                  ▼                  ▼
+       ┌─────────────┐   ┌──────────────┐   ┌──────────────┐
+       │ RAGRetriever│   │   Memoria    │   │  Contexto    │
+       │ (ChromaDB)  │   │  (JSON files)│   │  Pendiente   │
+       └─────────────┘   └──────────────┘   └──────────────┘
+              │
+              ▼
+       ┌─────────────┐
+       │ Document    │
+       │ (chunks)    │
+       └─────────────┘
+```
+
+**Monitor paralelo**: `ResourceMonitor` (thread) muestrea `psutil` del proceso Ollama mientras `ConversationalAgent` genera respuesta.
+
+---
+
+## 📖 Uso Rápido
+
+```bash
+# Activar entorno
+venv\Scripts\activate  # Windows
+source venv/bin/activate  # macOS/Linux
+
+# Lanzar app
+streamlit run app.py
+
+# Abrir en navegador: http://localhost:8501
+```
+
+### Flujo típico de trabajo:
+1. **Pestaña Modelos** → Verificar conexión Ollama, seleccionar/descargar modelo
+2. **Pestaña Config** → Agregar fuentes RAG (URL Techbox, Obsidian, PDFs) → Reindexar
+3. **Pestaña Chat** → Preguntar sobre documentos → Usar `/memory` o `/rag` para control explícito
+4. **Pestaña Buscar** → Buscar en historial → Seleccionar contexto → Volver a Chat → Enviar
+5. **Pestaña Memoria** → Guardar respuestas clave → Consultar después con `/memory`
+6. **Pestaña Monitor** → Ver consumo CPU/RAM de la última respuesta
+
+---
+
+## 🚀 Roadmap Post-MVP
+
+- [ ] Tests unitarios e integración (`pytest` + `pytest-asyncio`)
+- [ ] Exportar reportes de monitor (CSV, PNG, PDF)
+- [ ] Soporte multi-documento con namespaces en ChromaDB
+- [ ] Autenticación simple (para despliegue compartido)
+- [ ] Dockerfile + docker-compose para despliegue reproducible
+- [ ] Integración como plugin en `SDK-Chatbot` (opción 4: modelo local)
+- [ ] API REST opcional (FastAPI) para consumo externo
+- [ ] Métricas de calidad RAG (precision@k, recall@k, MRR)
+
+---
+
+## 🤝 Contribuir
+
+1. Fork del repositorio
+2. Crear rama: `git checkout -b feature/NuevaFeature`
+3. Commit: `git commit -m 'feat: descripción breve'`
+4. Push: `git push origin feature/NuevaFeature`
+5. Abrir Pull Request
+
+---
 
 ## 📝 Licencia
 
-Este proyecto se crea con fines educativos. Ver las políticas de tu institución sobre uso y distribución de código académico.
+MIT License — Uso educativo y comercial permitido. Ver `LICENSE` para detalles.
 
 ---
-*Desarrollado con ❤️ usando Python, Ollama y Streamlit*
-*Última actualización: Septiembre 2026*
+
+## 🙏 Créditos
+
+- **Ollama** — Servir modelos locales de forma simple
+- **ChromaDB** — Base vectorial embebida
+- **sentence-transformers** — Embeddings de calidad
+- **Streamlit** — UI rápida y bonita
+- **psutil / pandas / matplotlib / seaborn** — Observabilidad y datos
+
+---
+
+*Desarrollado con ❤️ para las entregas de POO + Sistemas Operativos — 2026*
