@@ -94,6 +94,15 @@
 - **Seguridad**: Todos los controles con `disabled=is_processing`
 - **Verificación**: `python -m py_compile app.py` ✅
 
+## ✅ Pestaña "Modelos y Ollama" con gestión dinámica (2026-10-14 - tarde)
+- **Nueva pestaña**: "⚙️ Modelos y Ollama" (6ª pestaña en st.tabs)
+- **OllamaClient.pull_model()**: Método nuevo para POST /api/pull con streaming de progreso (yield status, completed, total)
+- **Modelo Activo**: Selectbox con modelos de GET /api/tags (list_models()), guarda en session_state['current_model'] y muta ollama_client.model
+- **Descarga de modelos**: st.text_input + botón "Descargar Modelo" → pull_model() con st.status mostrando progreso % y estado
+- **Estado conexión**: Badge de conexión + métrica de modelos instalados + lista expandible
+- **Seguridad**: Todos controles con `disabled=is_processing`, manejo requests.RequestException
+- **Verificación**: `python -m py_compile core/ollama_client.py app.py` ✅
+
 ## Decisiones importantes
 - **Vector DB**: ChromaDB (persistente en `data/chroma/`)
 - **Embeddings**: sentence-transformers (all-MiniLM-L6-v2)
