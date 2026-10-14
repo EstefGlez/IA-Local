@@ -65,8 +65,15 @@
 - **Compilación verificada**: python -m py_compile app.py ✅
 
 ## ✅ Fix NameError is_processing (2026-10-14 - tarde)
-- **Problema**: Variable `is_processing` definida después del sidebar (línea ~518) pero usada en sidebar (línea ~456)
+- **Problema**: Variable `is_processing` definida después del sidebar (línea ~518) pero usa en sidebar (línea ~456)
 - **Solución**: Movida la definición a línea 359, justo después de inicializar `st.session_state` y antes del sidebar
+- **Verificación**: `python -m py_compile app.py` ✅
+
+## ✅ Purga granular de memorias por conversación (2026-10-14 - tarde)
+- **Botón nuevo**: "🗑️ Purgar memorias de conversación ACTUAL" en pestaña Memoria (línea ~1078)
+- **Alcance**: Elimina solo archivos JSON de la sesión activa (`current_conversation_id`), no todas las sesiones
+- **Seguridad**: `disabled=is_processing`, confirmación visual `st.success`, `st.rerun()` automático
+- **Diferencia**: Complementa "Eliminar TODOS" que actúa sobre sesión seleccionada; este actúa sobre sesión ACTUAL
 - **Verificación**: `python -m py_compile app.py` ✅
 
 ## Decisiones importantes

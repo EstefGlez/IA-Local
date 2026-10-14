@@ -1068,6 +1068,26 @@ with tab_memory:
             if selected_session == current_session_id:
                 st.markdown("`Sesión actual`")
 
+        # Botón para purgar memorias de la conversación ACTUAL (rápido, sin selector)
+        if current_session_id:
+            st.divider()
+            col_purge1, col_purge2 = st.columns([3, 1])
+            with col_purge1:
+                st.markdown("**⚡ Acción rápida:**")
+            with col_purge2:
+                if st.button("🗑️ Purgar memorias de conversación ACTUAL", type="secondary", use_container_width=True, disabled=is_processing, help="Elimina todos los archivos de memoria JSON de la sesión activa actual"):
+                    mem_dir = get_memory_dir(current_session_id)
+                    try:
+                        import shutil
+                        if mem_dir.exists():
+                            shutil.rmtree(mem_dir)
+                            st.success(f"✅ Memorias de la conversación actual purgadas correctamente")
+                        else:
+                            st.info("La conversación actual no tiene archivos de memoria para purgar")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Error al purgar: {e}")
+
         # Mostrar archivos de memoria de la sesión seleccionada
         memory_files = list_memory_files(selected_session)
 
