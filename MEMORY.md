@@ -103,6 +103,12 @@
 - **Seguridad**: Todos controles con `disabled=is_processing`, manejo requests.RequestException
 - **Verificación**: `python -m py_compile core/ollama_client.py app.py` ✅
 
+## ✅ Sidebar limpio: modelo activo real sin "Disponibles" (2026-10-14 - tarde)
+- **Eliminada** línea "Disponibles: ..." del sidebar (línea ~510)
+- **Modelo activo** ahora usa `session_state['current_model']` o `ollama_client.model` (no hardcodeado `llama3.2:3b`)
+- **Sidebar minimalista**: solo muestra "Activo: `modelo_real`"
+- **Verificación**: `python -m py_compile app.py` ✅
+
 ## Decisiones importantes
 - **Vector DB**: ChromaDB (persistente en `data/chroma/`)
 - **Embeddings**: sentence-transformers (all-MiniLM-L6-v2)
