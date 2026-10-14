@@ -3,8 +3,9 @@ from sentence_transformers import SentenceTransformer
 import hashlib
 import requests
 from pathlib import Path
-from typing import List
+from typing import List, Dict, Any
 from .document import Document
+from .rag_source_manager import RagSourceManager, SourceType
 
 
 class RAGRetriever:
@@ -13,13 +14,19 @@ class RAGRetriever:
     vector database and SentenceTransformers for generating embeddings.
     """
 
-    def __init__(self, persist_directory: str = "./data/chroma", collection_name: str = "documents"):
+    def __init__(
+        self,
+        persist_directory: str = "./data/chroma",
+        collection_name: str = "documents",
+        rag_source_manager: RagSourceManager = None,
+    ):
         """
         Initialize the RAGRetriever.
 
         Args:
             persist_directory: Directory where ChromaDB will store its data.
             collection_name: Name of the ChromaDB collection to use.
+            rag_source_manager: Optional RagSourceManager for dynamic source management.
         """
         # Ensure the persist directory exists
         Path(persist_directory).mkdir(parents=True, exist_ok=True)
@@ -31,6 +38,9 @@ class RAGRetriever:
 
         # Initialize the sentence transformer model for embeddings
         self.encoder = SentenceTransformer('all-MiniLM-L6-v2')
+
+        # Optional dynamic source manager
+        self.rag_source_manager = rag_source_manager
 
     def add_document(self, document: Document) -> None:
         """
@@ -150,8 +160,12 @@ class RAGRetriever:
 
         try:
             print(f"Fetching repository tree from: {api_url}")
-            response = requests.get(api_url)
-            response.raise_for_status()  # Raise an exception for bad status codes
+            response = requests.get(
+                api_url,
+                timeout=Document.REQUEST_TIMEOUT,
+                headers={"User-Agent": "IA-Local-RAG/1.0"}
+            )
+            response.raise_for_status()
 
             tree_data = response.json()
 
@@ -179,11 +193,9 @@ class RAGRetriever:
                     # Construct the raw GitHub URL
                     raw_url = f"https://raw.githubusercontent.com/{owner}/{repo}/{branch}/{file_path}"
 
-                    # Create a Document with the raw URL and source type
-                    document = Document(location=raw_url, source_type=source_type)
-
-                    # Add the document to the retriever
-                    self.add_document(document)
+                    # Validate and fetch with timeout
+                    content, chunks = self._validate_and_fetch_url(raw_url, source_type)
+                    self._add_chunks_to_collection(chunks, source_type)
                     print(f"Processed: {file_path}")
                     processed_count += 1
 
@@ -198,3 +210,160 @@ class RAGRetriever:
         except Exception as e:
             print(f"Error processing GitHub folder: {str(e)}")
             raise
+
+    def clear_collection(self) -> None:
+        """Elimina todos los documentos de la colección actual."""
+        try:
+            # Obtener todos los IDs y eliminarlos
+            all_docs = self.collection.get()
+            if all_docs and all_docs.get('ids'):
+                self.collection.delete(ids=all_docs['ids'])
+                print(f"[RAGRetriever] Colección limpiada: {len(all_docs['ids'])} documentos eliminados")
+        except Exception as e:
+            print(f"[RAGRetriever] Error limpiando colección: {e}")
+
+    def _validate_and_fetch_url(self, url: str, source_name: str) -> tuple[str, list[str]]:
+        """
+        Valida y descarga una URL, retornando el contenido y lista de chunks.
+        Ahora maneja automáticamente:
+        - Conversión de GitHub tree/blob a raw.githubusercontent.com
+        - Scraping de páginas web generales (con BeautifulSoup si está disponible)
+
+        Args:
+            url: URL a descargar
+            source_name: Nombre de la fuente para logging
+
+        Returns:
+            Tupla (contenido, lista_chunks)
+
+        Raises:
+            ValueError: Si la URL no es válida o no apunta a contenido texto
+            requests.exceptions.RequestException: Si falla la descarga
+            ImportError: Si se requiere BeautifulSoup pero no está instalado
+        """
+        # Validar que sea una URL válida
+        if not url.startswith(("http://", "https://")):
+            raise ValueError(f"URL inválida: {url}")
+
+        # Crear documento y cargar contenido (con timeout y conversión automática)
+        doc = Document(location=url, source_type=source_name)
+        content = doc.load_content()
+
+        # Obtener chunks
+        chunks = doc.get_chunks()
+        if not chunks:
+            raise ValueError("No se pudieron generar chunks del contenido descargado")
+
+        return content, chunks
+
+    def reindex_from_sources(self) -> Dict[str, Any]:
+        """
+        Re-indexa todas las fuentes habilitadas del RagSourceManager.
+
+        Returns:
+            Dict con estadísticas: sources_processed, documents_added, errors.
+        """
+        if self.rag_source_manager is None:
+            return {"sources_processed": 0, "documents_added": 0, "errors": ["No hay RagSourceManager configurado"]}
+
+        # Limpiar colección actual
+        self.clear_collection()
+
+        stats = {"sources_processed": 0, "documents_added": 0, "errors": []}
+        enabled_sources = self.rag_source_manager.list_enabled_sources()
+
+        for source in enabled_sources:
+            try:
+                # Limpiar location: quitar comillas dobles/simples al inicio/final y espacios
+                clean_location = source.location.strip().strip('"').strip("'").strip()
+
+                if source.source_type == SourceType.URL.value:
+                    # Validar y descargar con timeout estricto
+                    content, chunks = self._validate_and_fetch_url(clean_location, source.name)
+                    # Agregar chunks directamente para mejor control
+                    self._add_chunks_to_collection(chunks, source.name)
+                    stats["documents_added"] += len(chunks)
+
+                elif source.source_type == SourceType.LOCAL_FILE.value:
+                    doc = Document(location=clean_location, source_type=source.name)
+                    # Verificar que el archivo existe
+                    if not Path(clean_location).exists():
+                        raise FileNotFoundError(f"Archivo no encontrado: {clean_location}")
+                    self.add_document(doc)
+                    stats["documents_added"] += len(doc.get_chunks()) if doc.chunks else 1
+
+                elif source.source_type == SourceType.LOCAL_FOLDER.value:
+                    # Verificar que la carpeta existe
+                    if not Path(clean_location).exists():
+                        raise FileNotFoundError(f"Carpeta no encontrada: {clean_location}")
+                    self.load_folder(clean_location, source.name)
+                    # Contar archivos .md procesados
+                    md_files = list(Path(clean_location).rglob("*.md"))
+                    stats["documents_added"] += len(md_files)
+
+                elif source.source_type == SourceType.GITHUB_FOLDER.value:
+                    # metadata debería tener owner, repo, folder_path, branch
+                    meta = source.metadata
+                    self.load_from_github_folder(
+                        owner=meta.get("owner", ""),
+                        repo=meta.get("repo", ""),
+                        folder_path=meta.get("folder_path", ""),
+                        source_type=source.name,
+                        branch=meta.get("branch", "main"),
+                    )
+                    stats["documents_added"] += 1
+
+                self.rag_source_manager.mark_indexed(source.id)
+                stats["sources_processed"] += 1
+
+            except requests.exceptions.RequestException as e:
+                error_msg = f"Error de red en {source.name}: {str(e)}"
+                stats["errors"].append(error_msg)
+                print(f"[RAGRetriever] {error_msg}")
+            except ValueError as e:
+                error_msg = f"Error de validación en {source.name}: {str(e)}"
+                stats["errors"].append(error_msg)
+                print(f"[RAGRetriever] {error_msg}")
+            except Exception as e:
+                error_msg = f"Error indexando {source.name}: {str(e)}"
+                stats["errors"].append(error_msg)
+                print(f"[RAGRetriever] {error_msg}")
+
+        return stats
+
+    def _add_chunks_to_collection(self, chunks: list[str], source_name: str) -> None:
+        """
+        Agrega chunks directamente a la colección ChromaDB.
+
+        Args:
+            chunks: Lista de chunks de texto
+            source_name: Nombre de la fuente para metadatos
+        """
+        if not chunks:
+            return
+
+        # Generate embeddings for each chunk
+        embeddings = self.encoder.encode(chunks).tolist()
+
+        # Prepare data for ChromaDB
+        ids = []
+        for i, chunk in enumerate(chunks):
+            content_hash = hashlib.md5(f"{source_name}_{i}_{chunk}".encode('utf-8')).hexdigest()
+            ids.append(content_hash)
+
+        metadatas = [{"source": source_name, "chunk_index": i} for i in range(len(chunks))]
+
+        self.collection.upsert(
+            embeddings=embeddings,
+            documents=chunks,
+            metadatas=metadatas,
+            ids=ids
+        )
+
+    def has_documents(self) -> bool:
+        """Verifica si la colección tiene documentos indexados."""
+        try:
+            count = self.collection.count()
+            return count > 0
+        except Exception:
+            return False
