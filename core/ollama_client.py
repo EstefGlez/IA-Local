@@ -257,7 +257,7 @@ Responde basándote únicamente en el contexto proporcionado. Si el contexto no 
 
         Yields:
             Diccionarios con chunks de respuesta: {"content": str, "tool_calls": List[Dict] | None, "done": bool}
-            - content: fragmento de texto generado (acumulativo en cada yield)
+            - content: fragmento de texto generado (DELTA únicamente, no acumulativo)
             - tool_calls: herramientas invocadas (solo en el último chunk si done=True)
             - done: True cuando la generación terminó
 
@@ -290,9 +290,6 @@ Responde basándote únicamente en el contexto proporcionado. Si el contexto no 
             )
             response.raise_for_status()
 
-            accumulated_content = ""
-            final_tool_calls = None
-
             for line in response.iter_lines():
                 if not line:
                     continue
@@ -307,16 +304,15 @@ Responde basándote únicamente en el contexto proporcionado. Si el contexto no 
 
                 message = data["message"]
                 chunk_content = message.get("content", "")
-                accumulated_content += chunk_content
+                done = data.get("done", False)
 
-                # Tool calls solo aparecen en el último mensaje
-                if message.get("tool_calls"):
-                    final_tool_calls = message["tool_calls"]
+                # Tool calls solo aparecen en el último mensaje (cuando done=True)
+                tool_calls = message.get("tool_calls") if done else None
 
                 yield {
-                    "content": accumulated_content,
-                    "tool_calls": final_tool_calls,
-                    "done": data.get("done", False),
+                    "content": chunk_content,  # Solo el delta/fragmento actual
+                    "tool_calls": tool_calls,
+                    "done": done,
                 }
 
         except requests.RequestException as e:

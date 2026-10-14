@@ -1118,6 +1118,7 @@ class ConversationalAgent:
         # Streaming real desde Ollama
         start_time = time.perf_counter()
         samples = []
+        accumulated_content = ""  # Acumular localmente para sanitización final
 
         if MONITOR_AVAILABLE:
             with monitor_resources(
@@ -1132,12 +1133,12 @@ class ConversationalAgent:
                     tools=self.tools
                 )
                 for chunk in stream:
-                    content = chunk.get("content", "")
+                    chunk_content = chunk.get("content", "")
                     tool_calls = chunk.get("tool_calls")
                     done = chunk.get("done", False)
 
-                    # Sanitizar chunk
-                    clean_content, _ = sanitize_model_response(content)
+                    # Acumular delta localmente
+                    accumulated_content += chunk_content
 
                     # Métricas parciales
                     partial_metrics = {
@@ -1147,8 +1148,8 @@ class ConversationalAgent:
                     }
 
                     if done:
-                        # Sanitizar respuesta final completa
-                        final_response, extracted_proposals = sanitize_model_response(content)
+                        # Sanitizar respuesta final completa (acumulada localmente)
+                        final_response, extracted_proposals = sanitize_model_response(accumulated_content)
                         if extracted_proposals:
                             tool_results.extend([{"type": "memory_proposal", "data": p} for p in extracted_proposals])
 
@@ -1185,7 +1186,8 @@ class ConversationalAgent:
                         }
                         yield (final_response, final_metrics)
                     else:
-                        yield (clean_content, partial_metrics)
+                        # Yield SOLO el delta al frontend (no sanitizado para evitar overhead)
+                        yield (chunk_content, partial_metrics)
                 samples = monitor._samples if hasattr(monitor, '_samples') else []
         else:
             stream = self.ollama_client.chat_stream(
@@ -1195,11 +1197,12 @@ class ConversationalAgent:
                 tools=self.tools
             )
             for chunk in stream:
-                content = chunk.get("content", "")
+                chunk_content = chunk.get("content", "")
                 tool_calls = chunk.get("tool_calls")
                 done = chunk.get("done", False)
 
-                clean_content, _ = sanitize_model_response(content)
+                # Acumular delta localmente
+                accumulated_content += chunk_content
 
                 partial_metrics = {
                     "elapsed_time": time.perf_counter() - start_time,
@@ -1208,7 +1211,7 @@ class ConversationalAgent:
                 }
 
                 if done:
-                    final_response, extracted_proposals = sanitize_model_response(content)
+                    final_response, extracted_proposals = sanitize_model_response(accumulated_content)
                     if extracted_proposals:
                         tool_results.extend([{"type": "memory_proposal", "data": p} for p in extracted_proposals])
 
@@ -1229,7 +1232,8 @@ class ConversationalAgent:
                     }
                     yield (final_response, final_metrics)
                 else:
-                    yield (clean_content, partial_metrics)
+                    # Yield SOLO el delta al frontend
+                    yield (chunk_content, partial_metrics)
 
     def set_rag_enabled(self, enabled: bool) -> None:
         """Activa/desactiva el uso de RAG (para fallback graceful)."""

@@ -26,6 +26,28 @@
 - **Comando /rag**: Consulta RAG determinista con contexto inyectado
 - **Spinner contextual**: UI muestra acción según comando usado
 
+## ✅ Streaming en tiempo real (2026-10-14 - tarde)
+- **OllamaClient.chat_stream()**: Streaming real token-por-token via endpoint /api/chat con stream=true
+- **ConversationalAgent.ask_stream()**: Generador que mantiene ruteador comandos y yield progresivo
+- **UI Streaming**: st.write_stream en burbuja assistant con respuesta incremental
+- **Spinners contextuales**: '🧠 Procesando memoria...', '🔍 Consultando base RAG...', '✨ Generando respuesta...'
+- **Estado sesión optimizado**: Variables streaming_* para control preciso sin re-renderizados innecesarios
+- **Compatibilidad dual**: ask() legacy para tests/métricas + ask_stream() para UI
+
+## ✅ Fix bug duplicación streaming (2026-10-14 - tarde)
+- **OllamaClient.chat_stream()**: Ahora yield solo delta (chunk["message"]["content"]), no acumulado
+- **ConversationalAgent.ask_stream()**: Acumula localmente para sanitización final; yield deltas progresivos
+- **Eliminado overhead**: Sin sanitización en chunks parciales (solo en done=True)
+- **Compilación verificada**: python -m py_compile core/ollama_client.py core/agent.py app.py ✅
+
+## ✅ Fix orden cronológico mensajes streaming (2026-10-14 - tarde)
+- **Renderizado estricto User → Assistant**: Bucle principal renderiza TODO el historial primero
+- **Streaming DEBAJO**: Burbuja asistente se dibuja después del bucle principal
+- **User message inmediato**: Se agrega a messages y renderiza en mismo rerun
+- **Final response persistida**: Al terminar streaming, respuesta completa va a messages + rerun
+- **Spinner legacy condicionado**: Solo modo ask() (no streaming)
+- **Compilación verificada**: python -m py_compile app.py ✅
+
 ## Decisiones importantes
 - **Vector DB**: ChromaDB (persistente en `data/chroma/`)
 - **Embeddings**: sentence-transformers (all-MiniLM-L6-v2)
@@ -43,4 +65,4 @@
 - No hacer push a main sin permiso del usuario
 
 ## Rama actual
-`ia/2026-10-09-ollama-client` - Refactor arquitectura comandos /memory /rag completada
+`ia/2026-10-09-ollama-client` - Streaming en tiempo real + spinners contextuales + optimización UI completada

@@ -521,87 +521,10 @@ tab_chat, tab_monitor, tab_config, tab_memory = st.tabs([
 with tab_chat:
     st.session_state.active_tab = "chat"
 
-    # ==================== STREAMING EN TIEMPO REAL ====================
-    # Si hay streaming activo, ejecutar generador y mostrar en la burbuja del assistant
-    if st.session_state.streaming_active and agent_loaded and core_loaded:
-        # Determinar spinner contextual
-        prompt = st.session_state.streaming_prompt or ""
-        if prompt.strip().startswith("/memory"):
-            spinner_text = "🧠 Procesando memoria..."
-        elif prompt.strip().startswith("/rag"):
-            spinner_text = "🔍 Consultando base RAG..."
-        else:
-            spinner_text = "✨ Generando respuesta..."
-
-        # Placeholder para la respuesta en streaming
-        with st.chat_message("assistant"):
-            with st.spinner(spinner_text):
-                # Crear generador que consume ask_stream
-                def response_generator():
-                    full_response = ""
-                    try:
-                        stream = agent.ask_stream(
-                            pregunta=st.session_state.streaming_prompt,
-                            history=st.session_state.streaming_history,
-                            source=None,
-                            top_k=st.session_state.streaming_model_config.get("top_k", 3),
-                            temperature=st.session_state.streaming_model_config.get("temperature", 0.3),
-                            session_samples=st.session_state.session_samples,
-                            session_start_time=st.session_state.session_start_time,
-                            context_window_scale=st.session_state.context_window_scale,
-                            session_id=st.session_state.current_conversation_id,
-                        )
-                        for chunk_content, metrics in stream:
-                            full_response = chunk_content
-                            st.session_state.streaming_full_response = full_response
-                            if metrics and metrics.get("done"):
-                                st.session_state.streaming_metrics = metrics
-                                st.session_state.streaming_active = False
-                            yield full_response
-                    except Exception as e:
-                        yield f"Ocurrió un error: {e}"
-                        st.session_state.streaming_active = False
-
-                    # Al terminar, persistir respuesta completa
-                    if full_response and not st.session_state.streaming_active:
-                        assistant_message = {"role": "assistant", "content": full_response}
-                        st.session_state.messages.append(assistant_message)
-
-                        # Manejar propuestas de memoria
-                        if st.session_state.streaming_metrics and st.session_state.streaming_metrics.get("tool_results"):
-                            memory_proposals = [tr for tr in st.session_state.streaming_metrics["tool_results"] if tr.get("type") == "memory_proposal"]
-                            if memory_proposals:
-                                assistant_message["memory_proposals"] = [p["data"] for p in memory_proposals]
-
-                        # Persistir en conversation_manager
-                        conversation_manager.update_messages(
-                            st.session_state.current_conversation_id,
-                            st.session_state.messages
-                        )
-
-                        # Guardar métricas finales
-                        if st.session_state.streaming_metrics:
-                            st.session_state.last_metrics = st.session_state.streaming_metrics
-
-                        st.session_state.last_inference_end_time = time.time()
-                        st.session_state.processing = False
-                        # Limpiar estado de streaming
-                        st.session_state.streaming_prompt = None
-                        st.session_state.streaming_history = None
-                        st.session_state.streaming_model_config = None
-                        st.session_state.streaming_full_response = ""
-                        st.session_state.streaming_metrics = None
-
-                # Usar write_stream para mostrar token por token
-                st.write_stream(response_generator())
-
     # ==================== MOSTRAR HISTORIAL (mensajes completados) ====================
-    # Filtrar mensajes: si hay streaming activo, no mostrar el último user message duplicado
-    messages_to_show = st.session_state.messages
-    if st.session_state.streaming_active and messages_to_show and messages_to_show[-1]["role"] == "user":
-        messages_to_show = messages_to_show[:-1]  # El user message se muestra como parte del flujo
-
-    for idx, message in enumerate(messages_to_show):
+    # Renderizar TODOS los mensajes del historial en orden cronológico estricto
+    # (incluye el último user message recién agregado via chat_input)
+    for idx, message in enumerate(st.session_state.messages):
         with st.chat_message(message["role"]):
             st.markdown(message["content"])
 
@@ -734,8 +657,85 @@ with tab_chat:
                             st.toast("Propuesta de memoria descartada")
                             st.rerun()
 
-    # Spinner "Pensando..." durante procesamiento
-    if st.session_state.processing:
+    # ==================== STREAMING EN TIEMPO REAL ====================
+    # Si hay streaming activo, ejecutar generador y mostrar en la burbuja del assistant
+    # DEBAJO de todos los mensajes del historial (orden cronológico: User -> Assistant)
+    if st.session_state.streaming_active and agent_loaded and core_loaded:
+        # Determinar spinner contextual
+        prompt = st.session_state.streaming_prompt or ""
+        if prompt.strip().startswith("/memory"):
+            spinner_text = "🧠 Procesando memoria..."
+        elif prompt.strip().startswith("/rag"):
+            spinner_text = "🔍 Consultando base RAG..."
+        else:
+            spinner_text = "✨ Generando respuesta..."
+
+        # Placeholder para la respuesta en streaming
+        with st.chat_message("assistant"):
+            with st.spinner(spinner_text):
+                # Crear generador que consume ask_stream
+                def response_generator():
+                    full_response = ""
+                    try:
+                        stream = agent.ask_stream(
+                            pregunta=st.session_state.streaming_prompt,
+                            history=st.session_state.streaming_history,
+                            source=None,
+                            top_k=st.session_state.streaming_model_config.get("top_k", 3),
+                            temperature=st.session_state.streaming_model_config.get("temperature", 0.3),
+                            session_samples=st.session_state.session_samples,
+                            session_start_time=st.session_state.session_start_time,
+                            context_window_scale=st.session_state.context_window_scale,
+                            session_id=st.session_state.current_conversation_id,
+                        )
+                        for chunk_content, metrics in stream:
+                            full_response = chunk_content
+                            st.session_state.streaming_full_response = full_response
+                            if metrics and metrics.get("done"):
+                                st.session_state.streaming_metrics = metrics
+                                st.session_state.streaming_active = False
+                            yield full_response
+                    except Exception as e:
+                        yield f"Ocurrió un error: {e}"
+                        st.session_state.streaming_active = False
+
+                    # Al terminar, persistir respuesta completa y hacer rerun
+                    if full_response and not st.session_state.streaming_active:
+                        assistant_message = {"role": "assistant", "content": full_response}
+                        st.session_state.messages.append(assistant_message)
+
+                        # Manejar propuestas de memoria
+                        if st.session_state.streaming_metrics and st.session_state.streaming_metrics.get("tool_results"):
+                            memory_proposals = [tr for tr in st.session_state.streaming_metrics["tool_results"] if tr.get("type") == "memory_proposal"]
+                            if memory_proposals:
+                                assistant_message["memory_proposals"] = [p["data"] for p in memory_proposals]
+
+                        # Persistir en conversation_manager
+                        conversation_manager.update_messages(
+                            st.session_state.current_conversation_id,
+                            st.session_state.messages
+                        )
+
+                        # Guardar métricas finales
+                        if st.session_state.streaming_metrics:
+                            st.session_state.last_metrics = st.session_state.streaming_metrics
+
+                        st.session_state.last_inference_end_time = time.time()
+                        st.session_state.processing = False
+                        # Limpiar estado de streaming
+                        st.session_state.streaming_prompt = None
+                        st.session_state.streaming_history = None
+                        st.session_state.streaming_model_config = None
+                        st.session_state.streaming_full_response = ""
+                        st.session_state.streaming_metrics = None
+                        # Rerun para que el mensaje final aparezca en el bucle principal
+                        st.rerun()
+
+                # Usar write_stream para mostrar token por token
+                st.write_stream(response_generator())
+
+    # Spinner "Pensando..." durante procesamiento (solo modo legacy/ask, NO streaming)
+    if st.session_state.processing and not st.session_state.streaming_active:
         with st.chat_message("assistant"):
             # Mostrar spinner contextual según el último mensaje
             last_user_msg = st.session_state.messages[-1]["content"] if st.session_state.messages else ""
