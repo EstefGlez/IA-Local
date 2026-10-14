@@ -507,11 +507,8 @@ with st.sidebar:
     # Info modelo en sidebar
     if core_loaded:
         st.markdown("### 📋 Modelo")
-        try:
-            models = ollama_client.list_models()
-            st.markdown(f"- **Activo:** `llama3.2:3b`\n- **Disponibles:** {', '.join(models[:3])}{'...' if len(models) > 3 else ''}")
-        except Exception:
-            st.markdown("- **Activo:** `llama3.2:3b`")
+        active_model = st.session_state.get("current_model", ollama_client.model)
+        st.markdown(f"- **Activo:** `{active_model}`")
 
 # ==================== PESTAÑAS PRINCIPALES ====================
 # Track active tab via session state
