@@ -893,15 +893,6 @@ class ConversationalAgent:
         # Añadir pregunta actual (ya modificada con contexto si aplica)
         messages.append({"role": "user", "content": pregunta})
 
-        # Añadir historial de conversación recortado
-        if history:
-            for msg in history:
-                if msg["role"] in ("user", "assistant"):
-                    messages.append(msg)
-
-        # Añadir pregunta actual (ya modificada con contexto si aplica)
-        messages.append({"role": "user", "content": pregunta})
-
         # 2. Inferencia con monitoreo de recursos (SIN tools)
         start_time = time.perf_counter()
 
@@ -989,6 +980,256 @@ class ConversationalAgent:
         }
 
         return final_response, metrics
+
+    def ask_stream(
+        self,
+        pregunta: str,
+        history: Optional[List[dict]] = None,
+        source: Optional[str] = None,
+        top_k: Optional[int] = None,
+        temperature: float = 0.3,
+        session_samples: Optional[list] = None,
+        session_start_time: Optional[float] = None,
+        context_window_scale: float = 0.7,
+        session_id: Optional[str] = None,
+    ):
+        """
+        Genera una respuesta en streaming (token por token) usando el historial completo.
+        Mismo ruteador de comandos que ask() pero yield progresivo.
+
+        Yields:
+            Tuplas (chunk_content: str, metrics_parciales: dict | None)
+            - chunk_content: fragmento de respuesta acumulativo
+            - metrics_parciales: None durante streaming, dict final al terminar (done=True)
+        """
+        k = top_k or self.top_k
+        tool_results = []
+
+        # Variables para métricas (inicializadas con defaults)
+        chars_before = 0
+        chars_after = 0
+        num_ctx = 2048
+        rag_used = False
+        rag_fallback = True
+
+        # ============================================================
+        # RUTEADOR DE COMANDOS EXPLÍCITOS (mismo que ask)
+        # ============================================================
+        stripped_pregunta = pregunta.strip()
+        is_memory_cmd = stripped_pregunta.startswith("/memory")
+        is_rag_cmd = stripped_pregunta.startswith("/rag")
+
+        # Extraer query del comando
+        if is_memory_cmd:
+            query = stripped_pregunta[len("/memory"):].strip()
+            if not query:
+                yield ("Uso: `/memory <término de búsqueda>` - Busca en tus archivos de memoria guardados.", {
+                    "elapsed_time": 0, "tool_calls_executed": 1,
+                    "tool_results": [{"type": "memory_help", "success": True, "message": "Ayuda de comando /memory"}],
+                    "rag_used": False, "rag_fallback": True, "done": True
+                })
+                return
+            if session_id:
+                memory_result = search_memory_files(session_id, query)
+                tool_results.append({
+                    "type": "search_memory",
+                    "success": memory_result.get("success", False),
+                    "message": memory_result.get("message", ""),
+                    "data": memory_result
+                })
+                if memory_result.get("results"):
+                    memory_context = self._format_memory_results(memory_result["results"])
+                    pregunta = f"{pregunta}\n\n[RESULTADOS DE MEMORIA ENCONTRADOS - Presenta el contenido completo de cada archivo:]\n{memory_context}"
+                else:
+                    pregunta = f"{pregunta}\n\n[NO SE ENCONTRARON MEMORIAS COINCIDENTES PARA: '{query}']"
+            else:
+                yield ("No hay sesión activa para buscar memorias.", {
+                    "elapsed_time": 0, "tool_calls_executed": 1,
+                    "tool_results": [{"type": "memory_error", "success": False, "message": "Sin session_id"}],
+                    "rag_used": False, "rag_fallback": True, "done": True
+                })
+                return
+
+        elif is_rag_cmd:
+            query = stripped_pregunta[len("/rag"):].strip()
+            if not query:
+                yield ("Uso: `/rag <consulta>` - Busca en la base de conocimiento documental (RAG).", {
+                    "elapsed_time": 0, "tool_calls_executed": 1,
+                    "tool_results": [{"type": "rag_help", "success": True, "message": "Ayuda de comando /rag"}],
+                    "rag_used": False, "rag_fallback": True, "done": True
+                })
+                return
+            rag_used = True
+            rag_fallback = False
+            if self._rag_enabled and self.rag_source_manager and self.rag_source_manager.has_sources():
+                chunks = self.retriever.search(query, top_k=k, source=source)
+                if chunks:
+                    raw_context = "\n\n---\n\n".join(chunks)
+                    cleaned_context = clean_html_content(raw_context)
+                    chars_before = len(raw_context)
+                    chars_after = len(cleaned_context)
+                    estimated_tokens = chars_after // 4
+                    num_ctx = 4096 if estimated_tokens > 800 else 2048
+                    pregunta = f"{pregunta}\n\n[CONTEXTO RAG RECUPERADO PARA: '{query}']\n{cleaned_context}"
+                else:
+                    pregunta = f"{pregunta}\n\n[NO SE ENCONTRÓ CONTEXTO RAG RELEVANTE PARA: '{query}']"
+                    chars_before = chars_after = 0
+                    num_ctx = 2048
+                tool_results.append({
+                    "type": "search_rag",
+                    "success": True,
+                    "message": f"RAG consultado para: '{query}' ({len(chunks)} chunks)" if chunks else f"RAG sin resultados para: '{query}'",
+                    "data": {"chunks_found": len(chunks)}
+                })
+            else:
+                pregunta = f"{pregunta}\n\n[RAG NO DISPONIBLE: No hay fuentes configuradas o RAG deshabilitado]"
+                chars_before = chars_after = 0
+                num_ctx = 2048
+                rag_fallback = True
+                tool_results.append({
+                    "type": "search_rag",
+                    "success": False,
+                    "message": "RAG no disponible",
+                    "data": {}
+                })
+        else:
+            chars_before = chars_after = 0
+            num_ctx = 2048
+            rag_fallback = True
+
+        # Recortar historial según la escala de ventana de contexto
+        if history:
+            history = trim_history_by_scale(history, context_window_scale)
+
+        # Construir mensajes para chat
+        messages = [
+            {"role": "system", "content": self.system_instruction},
+        ]
+        if not is_memory_cmd and not is_rag_cmd:
+            messages.append({"role": "system", "content": "[CONVERSACIÓN GENERAL - Sin contexto RAG ni memoria automática]"})
+
+        if history:
+            for msg in history:
+                if msg["role"] in ("user", "assistant"):
+                    messages.append(msg)
+
+        messages.append({"role": "user", "content": pregunta})
+
+        # Streaming real desde Ollama
+        start_time = time.perf_counter()
+        samples = []
+
+        if MONITOR_AVAILABLE:
+            with monitor_resources(
+                interval=0.3,
+                all_samples=session_samples,
+                session_start_time=session_start_time,
+            ) as monitor:
+                stream = self.ollama_client.chat_stream(
+                    messages=messages,
+                    temperature=temperature,
+                    num_ctx=num_ctx,
+                    tools=self.tools
+                )
+                for chunk in stream:
+                    content = chunk.get("content", "")
+                    tool_calls = chunk.get("tool_calls")
+                    done = chunk.get("done", False)
+
+                    # Sanitizar chunk
+                    clean_content, _ = sanitize_model_response(content)
+
+                    # Métricas parciales
+                    partial_metrics = {
+                        "elapsed_time": time.perf_counter() - start_time,
+                        "partial": True,
+                        "done": done,
+                    }
+
+                    if done:
+                        # Sanitizar respuesta final completa
+                        final_response, extracted_proposals = sanitize_model_response(content)
+                        if extracted_proposals:
+                            tool_results.extend([{"type": "memory_proposal", "data": p} for p in extracted_proposals])
+
+                        # Métricas finales
+                        if monitor:
+                            try:
+                                cpu_vals = [s[1] for s in monitor._samples]
+                                ram_vals = [s[2] for s in monitor._samples]
+                                avg_cpu = sum(cpu_vals) / len(cpu_vals) if cpu_vals else 0
+                                cpu_peak = max(cpu_vals) if cpu_vals else 0
+                                avg_ram = sum(ram_vals) / len(ram_vals) if ram_vals else 0
+                                ram_peak = max(ram_vals) if ram_vals else 0
+                                num_samples = len(cpu_vals)
+                            except Exception:
+                                avg_cpu = cpu_peak = avg_ram = ram_peak = 0.0
+                                num_samples = 0
+
+                        final_metrics = {
+                            "elapsed_time": time.perf_counter() - start_time,
+                            "avg_cpu": avg_cpu,
+                            "cpu_peak": cpu_peak,
+                            "avg_ram": avg_ram,
+                            "ram_peak": ram_peak,
+                            "samples": num_samples,
+                            "dashboard_path": "performance_dashboard.png",
+                            "session_samples": session_samples,
+                            "rag_used": rag_used,
+                            "rag_fallback": rag_fallback,
+                            "tool_calls_executed": len(tool_results),
+                            "tool_results": tool_results,
+                            "chars_before": chars_before,
+                            "chars_after": chars_after,
+                            "done": True,
+                        }
+                        yield (final_response, final_metrics)
+                    else:
+                        yield (clean_content, partial_metrics)
+                samples = monitor._samples if hasattr(monitor, '_samples') else []
+        else:
+            stream = self.ollama_client.chat_stream(
+                messages=messages,
+                temperature=temperature,
+                num_ctx=num_ctx,
+                tools=self.tools
+            )
+            for chunk in stream:
+                content = chunk.get("content", "")
+                tool_calls = chunk.get("tool_calls")
+                done = chunk.get("done", False)
+
+                clean_content, _ = sanitize_model_response(content)
+
+                partial_metrics = {
+                    "elapsed_time": time.perf_counter() - start_time,
+                    "partial": True,
+                    "done": done,
+                }
+
+                if done:
+                    final_response, extracted_proposals = sanitize_model_response(content)
+                    if extracted_proposals:
+                        tool_results.extend([{"type": "memory_proposal", "data": p} for p in extracted_proposals])
+
+                    final_metrics = {
+                        "elapsed_time": time.perf_counter() - start_time,
+                        "avg_cpu": 0.0, "cpu_peak": 0.0,
+                        "avg_ram": 0.0, "ram_peak": 0.0,
+                        "samples": 0,
+                        "dashboard_path": "performance_dashboard.png",
+                        "session_samples": session_samples,
+                        "rag_used": rag_used,
+                        "rag_fallback": rag_fallback,
+                        "tool_calls_executed": len(tool_results),
+                        "tool_results": tool_results,
+                        "chars_before": chars_before,
+                        "chars_after": chars_after,
+                        "done": True,
+                    }
+                    yield (final_response, final_metrics)
+                else:
+                    yield (clean_content, partial_metrics)
 
     def set_rag_enabled(self, enabled: bool) -> None:
         """Activa/desactiva el uso de RAG (para fallback graceful)."""

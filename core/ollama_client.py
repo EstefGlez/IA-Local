@@ -2,7 +2,7 @@
 
 import json
 import requests
-from typing import Optional, List, Dict
+from typing import Optional, List, Dict, Generator
 
 
 class OllamaClient:
@@ -231,6 +231,98 @@ Responde basándote únicamente en el contexto proporcionado. Si el contexto no 
         response.raise_for_status()
         data = response.json()
         return [model["name"] for model in data.get("models", [])]
+
+    def chat_stream(
+        self,
+        messages: List[Dict[str, str]],
+        model: Optional[str] = None,
+        temperature: float = 0.7,
+        top_p: float = 0.9,
+        max_tokens: Optional[int] = None,
+        num_ctx: Optional[int] = None,
+        tools: Optional[List[Dict]] = None,
+    ) -> Generator[Dict, None, None]:
+        """
+        Envía una conversación a Ollama usando /api/chat con streaming activado.
+        Genera tokens progresivamente a medida que el modelo los produce.
+
+        Args:
+            messages: Lista de mensajes en formato [{"role": "user|assistant|system|tool", "content": "..."}]
+            model: Modelo a usar (sobrescribe el del constructor si se proporciona)
+            temperature: Temperatura para el muestreo (0.0 - 1.0)
+            top_p: Top-p para nucleus sampling
+            max_tokens: Número máximo de tokens a generar (None = sin límite, default 2048)
+            num_ctx: Tamaño de la ventana de contexto (default 4096)
+            tools: Lista de definiciones de herramientas para function calling
+
+        Yields:
+            Diccionarios con chunks de respuesta: {"content": str, "tool_calls": List[Dict] | None, "done": bool}
+            - content: fragmento de texto generado (acumulativo en cada yield)
+            - tool_calls: herramientas invocadas (solo en el último chunk si done=True)
+            - done: True cuando la generación terminó
+
+        Raises:
+            requests.RequestException: Si hay error en la petición HTTP
+            ValueError: Si la respuesta no tiene el formato esperado
+        """
+        payload = {
+            "model": model or self.model,
+            "messages": messages,
+            "stream": True,
+            "options": {
+                "temperature": temperature,
+                "top_p": top_p,
+                "num_ctx": num_ctx or 4096,
+                "num_predict": max_tokens or 2048,
+                "keep_alive": "5m",
+            },
+        }
+
+        if tools:
+            payload["tools"] = tools
+
+        try:
+            response = requests.post(
+                self._chat_endpoint,
+                json=payload,
+                timeout=self.timeout,
+                stream=True,
+            )
+            response.raise_for_status()
+
+            accumulated_content = ""
+            final_tool_calls = None
+
+            for line in response.iter_lines():
+                if not line:
+                    continue
+
+                try:
+                    data = json.loads(line.decode("utf-8"))
+                except json.JSONDecodeError:
+                    continue
+
+                if "message" not in data:
+                    continue
+
+                message = data["message"]
+                chunk_content = message.get("content", "")
+                accumulated_content += chunk_content
+
+                # Tool calls solo aparecen en el último mensaje
+                if message.get("tool_calls"):
+                    final_tool_calls = message["tool_calls"]
+
+                yield {
+                    "content": accumulated_content,
+                    "tool_calls": final_tool_calls,
+                    "done": data.get("done", False),
+                }
+
+        except requests.RequestException as e:
+            raise requests.RequestException(f"Error al comunicarse con Ollama chat stream: {e}") from e
+        except json.JSONDecodeError as e:
+            raise ValueError(f"Respuesta no es JSON válido en streaming: {e}") from e
 
 
 if __name__ == "__main__":

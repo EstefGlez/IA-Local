@@ -341,89 +341,65 @@ if core_loaded and st.session_state.current_conversation_id is None:
     st.session_state.current_conversation_id = current_conv.id
     st.session_state.messages = current_conv.messages
 
-# ==================== PROCESAMIENTO DE INFERENCIA (antes de renderizar UI) ====================
+# ==================== ESTADO DE STREAMING ====================
+if "streaming_active" not in st.session_state:
+    st.session_state.streaming_active = False
+if "streaming_prompt" not in st.session_state:
+    st.session_state.streaming_prompt = None
+if "streaming_history" not in st.session_state:
+    st.session_state.streaming_history = None
+if "streaming_model_config" not in st.session_state:
+    st.session_state.streaming_model_config = None
+if "streaming_full_response" not in st.session_state:
+    st.session_state.streaming_full_response = ""
+if "streaming_metrics" not in st.session_state:
+    st.session_state.streaming_metrics = None
+
+# ==================== INICIAR STREAMING (antes de renderizar UI) ====================
+# Detectar nuevo prompt para iniciar streaming
 if st.session_state.processing and agent_loaded and core_loaded:
     user_messages = [m for m in st.session_state.messages if m["role"] == "user"]
     if user_messages:
         last_prompt = user_messages[-1]["content"]
 
-        # Insertar punto sintético de "valle" (reposo)
-        current_time = time.time()
-        if st.session_state.last_inference_end_time is not None:
-            idle_duration = current_time - st.session_state.last_inference_end_time
-            if idle_duration > 0.5:
-                try:
-                    import psutil
-                    base_cpu = psutil.cpu_percent(interval=0.1)
-                    base_ram = psutil.Process().memory_percent()
-                except Exception:
-                    base_cpu = 1.0
-                    base_ram = 10.0
+        # Solo iniciar streaming si no hay uno activo ya
+        if not st.session_state.streaming_active:
+            # Insertar punto sintético de "valle" (reposo)
+            current_time = time.time()
+            if st.session_state.last_inference_end_time is not None:
+                idle_duration = current_time - st.session_state.last_inference_end_time
+                if idle_duration > 0.5:
+                    try:
+                        import psutil
+                        base_cpu = psutil.cpu_percent(interval=0.1)
+                        base_ram = psutil.Process().memory_percent()
+                    except Exception:
+                        base_cpu = 1.0
+                        base_ram = 10.0
 
-                valley_timestamp = current_time - st.session_state.session_start_time
-                st.session_state.session_samples.append(
-                    (valley_timestamp, base_cpu, base_ram)
-                )
+                    valley_timestamp = current_time - st.session_state.session_start_time
+                    st.session_state.session_samples.append(
+                        (valley_timestamp, base_cpu, base_ram)
+                    )
 
-        # Obtener config del modelo de la conversación actual
-        current_conv = conversation_manager.load_conversation(
-            st.session_state.current_conversation_id
-        )
-        model_config = current_conv.model_config if current_conv else {"temperature": 0.3, "top_k": 3}
-
-        # Preparar historial para el agente (excluir el último mensaje del usuario que se pasa aparte)
-        history = st.session_state.messages[:-1] if st.session_state.messages else []
-
-        # Llamada al agente con historial completo y escala de ventana de contexto
-        try:
-            respuesta, metrics = agent.ask(
-                pregunta=last_prompt,
-                history=history,  # Pasar historial completo
-                source=None,  # Buscar en todas las fuentes
-                top_k=model_config.get("top_k", 3),
-                temperature=model_config.get("temperature", 0.3),
-                session_samples=st.session_state.session_samples,
-                session_start_time=st.session_state.session_start_time,
-                context_window_scale=st.session_state.context_window_scale,
-                session_id=st.session_state.current_conversation_id,
+            # Obtener config del modelo
+            current_conv = conversation_manager.load_conversation(
+                st.session_state.current_conversation_id
             )
-        except Exception as e:
-            respuesta = f"Ocurrió un error al procesar la solicitud: {e}"
-            metrics = {}
+            model_config = current_conv.model_config if current_conv else {"temperature": 0.3, "top_k": 3}
 
-        # Guardar respuesta del asistente
-        assistant_message = {"role": "assistant", "content": respuesta}
-        st.session_state.messages.append(assistant_message)
+            # Preparar historial
+            history = st.session_state.messages[:-1] if st.session_state.messages else []
 
-        # Manejar propuestas de memoria del agente (nuevo flujo con botones de confirmación)
-        if metrics and metrics.get("tool_results"):
-            memory_proposals = [tr for tr in metrics["tool_results"] if tr.get("type") == "memory_proposal"]
-            if memory_proposals:
-                # Añadir propuestas al mensaje para renderizado en UI
-                assistant_message["memory_proposals"] = [p["data"] for p in memory_proposals]
-
-        # Persistir en conversation_manager
-        conversation_manager.update_messages(
-            st.session_state.current_conversation_id,
-            st.session_state.messages
-        )
-
-        # Guardar métricas
-        if metrics:
-            st.session_state.last_metrics = metrics
-        else:
-            dashboard_path = Path("performance_dashboard.png")
-            st.session_state.last_metrics = {
-                "elapsed_time": 0, "avg_cpu": 0, "cpu_peak": 0,
-                "avg_ram": 0, "ram_peak": 0, "samples": 0,
-                "dashboard_path": str(dashboard_path) if dashboard_path.exists() else None,
-                "session_samples": st.session_state.session_samples,
-                "rag_used": False, "rag_fallback": True,
-            }
-
-        st.session_state.last_inference_end_time = time.time()
-        st.session_state.processing = False
-        st.rerun()
+            # Activar modo streaming
+            st.session_state.streaming_active = True
+            st.session_state.streaming_prompt = last_prompt
+            st.session_state.streaming_history = history
+            st.session_state.streaming_model_config = model_config
+            st.session_state.streaming_full_response = ""
+            st.session_state.streaming_metrics = None
+            # Forzar rerender para mostrar streaming
+            st.rerun()
 
 # Re-indexar RAG si se disparó el trigger
 if st.session_state.rag_reindex_triggered and core_loaded:
@@ -544,8 +520,88 @@ tab_chat, tab_monitor, tab_config, tab_memory = st.tabs([
 # -------------------- PESTAÑA 1: CHAT INTELIGENTE --------------------
 with tab_chat:
     st.session_state.active_tab = "chat"
-    # Mostrar historial
-    for idx, message in enumerate(st.session_state.messages):
+
+    # ==================== STREAMING EN TIEMPO REAL ====================
+    # Si hay streaming activo, ejecutar generador y mostrar en la burbuja del assistant
+    if st.session_state.streaming_active and agent_loaded and core_loaded:
+        # Determinar spinner contextual
+        prompt = st.session_state.streaming_prompt or ""
+        if prompt.strip().startswith("/memory"):
+            spinner_text = "🧠 Procesando memoria..."
+        elif prompt.strip().startswith("/rag"):
+            spinner_text = "🔍 Consultando base RAG..."
+        else:
+            spinner_text = "✨ Generando respuesta..."
+
+        # Placeholder para la respuesta en streaming
+        with st.chat_message("assistant"):
+            with st.spinner(spinner_text):
+                # Crear generador que consume ask_stream
+                def response_generator():
+                    full_response = ""
+                    try:
+                        stream = agent.ask_stream(
+                            pregunta=st.session_state.streaming_prompt,
+                            history=st.session_state.streaming_history,
+                            source=None,
+                            top_k=st.session_state.streaming_model_config.get("top_k", 3),
+                            temperature=st.session_state.streaming_model_config.get("temperature", 0.3),
+                            session_samples=st.session_state.session_samples,
+                            session_start_time=st.session_state.session_start_time,
+                            context_window_scale=st.session_state.context_window_scale,
+                            session_id=st.session_state.current_conversation_id,
+                        )
+                        for chunk_content, metrics in stream:
+                            full_response = chunk_content
+                            st.session_state.streaming_full_response = full_response
+                            if metrics and metrics.get("done"):
+                                st.session_state.streaming_metrics = metrics
+                                st.session_state.streaming_active = False
+                            yield full_response
+                    except Exception as e:
+                        yield f"Ocurrió un error: {e}"
+                        st.session_state.streaming_active = False
+
+                    # Al terminar, persistir respuesta completa
+                    if full_response and not st.session_state.streaming_active:
+                        assistant_message = {"role": "assistant", "content": full_response}
+                        st.session_state.messages.append(assistant_message)
+
+                        # Manejar propuestas de memoria
+                        if st.session_state.streaming_metrics and st.session_state.streaming_metrics.get("tool_results"):
+                            memory_proposals = [tr for tr in st.session_state.streaming_metrics["tool_results"] if tr.get("type") == "memory_proposal"]
+                            if memory_proposals:
+                                assistant_message["memory_proposals"] = [p["data"] for p in memory_proposals]
+
+                        # Persistir en conversation_manager
+                        conversation_manager.update_messages(
+                            st.session_state.current_conversation_id,
+                            st.session_state.messages
+                        )
+
+                        # Guardar métricas finales
+                        if st.session_state.streaming_metrics:
+                            st.session_state.last_metrics = st.session_state.streaming_metrics
+
+                        st.session_state.last_inference_end_time = time.time()
+                        st.session_state.processing = False
+                        # Limpiar estado de streaming
+                        st.session_state.streaming_prompt = None
+                        st.session_state.streaming_history = None
+                        st.session_state.streaming_model_config = None
+                        st.session_state.streaming_full_response = ""
+                        st.session_state.streaming_metrics = None
+
+                # Usar write_stream para mostrar token por token
+                st.write_stream(response_generator())
+
+    # ==================== MOSTRAR HISTORIAL (mensajes completados) ====================
+    # Filtrar mensajes: si hay streaming activo, no mostrar el último user message duplicado
+    messages_to_show = st.session_state.messages
+    if st.session_state.streaming_active and messages_to_show and messages_to_show[-1]["role"] == "user":
+        messages_to_show = messages_to_show[:-1]  # El user message se muestra como parte del flujo
+
+    for idx, message in enumerate(messages_to_show):
         with st.chat_message(message["role"]):
             st.markdown(message["content"])
 
