@@ -8,7 +8,7 @@
 - [x] Archivos de configuración: `.env`, `.env.example`, `.gitignore`, `requirements.txt`
 - [x] **Refactor de memoria v1**: Trigger ligero `save_json_memory` (solo suggested_filename + tema) + función determinista `build_memory_json_from_response()` que empaqueta fielmente toda la respuesta Markdown
 - [x] **Fix crítico memoria v1**: System prompt reforzado (prohíbe save_json_memory en saludos/casual) + validación de contenido sustancial en `build_memory_json_from_response()` con fallback a historial
-- [x] **Refactor de memoria v2 (actual)**: Desvincular totalmente del system prompt. Eliminar tool save_json_memory del agente. Guardado de memoria vía botón "💾 Guardar como Memoria" en UI (app.py) que invoca build_memory_json_from_response() determinísticamente para la respuesta seleccionada.
+- [x] **Refactor de memoria v2**: Desvincular totalmente del system prompt. Eliminar tool save_json_memory del agente. Guardado de memoria vía botón "💾 Guardar como Memoria" en UI (app.py) que invoca build_memory_json_from_response() determinísticamente para la respuesta seleccionada.
 
 ## 🚧 En progreso / Próximos pasos
 1. Instalar Ollama y descargar modelo `llama3.2:3b`
@@ -16,7 +16,15 @@
 3. Construir interfaz Streamlit (app.py)
 4. Implementar `ResourceMonitor` con psutil
 5. Conectar monitor al asistente y visualizar con matplotlib/seaborn
-6. ✅ **Tool search_saved_memories implementada** (core/agent.py) - lectura de memorias bajo demanda vía tool calling
+
+## ✅ Recientemente completado (2026-10-14)
+- **Refactor arquitectura agente**: Ruteador de comandos explícitos `/memory` y `/rag` en `ConversationalAgent.ask()`
+- **Eliminar tool-calling automático**: Flujo determinista, sin tool calls del LLM para memoria/RAG
+- **System prompt limpio**: Solo identidad + estilo, sin lógica de herramientas ni restricciones de directorios
+- **RAG escalable**: Eliminado límite de 2 fuentes simultáneas en UI y backend
+- **Comando /memory**: Búsqueda determinista en archivos JSON con contenido completo inyectado
+- **Comando /rag**: Consulta RAG determinista con contexto inyectado
+- **Spinner contextual**: UI muestra acción según comando usado
 
 ## Decisiones importantes
 - **Vector DB**: ChromaDB (persistente en `data/chroma/`)
@@ -25,7 +33,8 @@
 - **RAG Source**: Especificaciones Techbox desde URL GitHub raw + Obsidian (source_type)
 - **Interfaz**: Streamlit (una app, dos pestañas)
 - **Agent params**: top_k=3, temperature=0.3 (factual), system_instruction anti-alucinación
-- **Memorias**: Guardado vía UI (botón "Guardar como Memoria"), lectura vía tool calling `search_saved_memories`
+- **Memorias**: Guardado vía UI (botón "Guardar como Memoria"), lectura vía comando explícito `/memory <query>`
+- **RAG**: Consulta vía comando explícito `/rag <query>`, sin límites de fuentes simultáneas
 
 ## Errores a evitar
 - No asumir que Ollama está instalado - verificar con `check_connection()` antes de usar
@@ -34,4 +43,4 @@
 - No hacer push a main sin permiso del usuario
 
 ## Rama actual
-`ia/2026-10-09-ollama-client` - Implementación de OllamaClient + ConversationalAgent completada
+`ia/2026-10-09-ollama-client` - Refactor arquitectura comandos /memory /rag completada
