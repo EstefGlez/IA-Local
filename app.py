@@ -681,12 +681,28 @@ with tab_chat:
     # Spinner "Pensando..." durante procesamiento
     if st.session_state.processing:
         with st.chat_message("assistant"):
-            with st.spinner("Pensando y consultando contexto local..."):
+            # Mostrar spinner contextual según el último mensaje
+            last_user_msg = st.session_state.messages[-1]["content"] if st.session_state.messages else ""
+            if last_user_msg.strip().startswith("/memory"):
+                spinner_text = "Buscando en archivos de memoria..."
+            elif last_user_msg.strip().startswith("/rag"):
+                spinner_text = "Consultando base de conocimiento RAG..."
+            else:
+                spinner_text = "Pensando..."
+            with st.spinner(spinner_text):
                 pass
+
+    # Ayuda de comandos
+    with st.expander("💡 Comandos disponibles", expanded=False):
+        st.markdown("""
+        - **Conversación general**: Escribe tu pregunta normalmente (sin RAG ni memoria automática)
+        - **`/memory <término>`**: Busca en tus archivos de memoria guardados e inyecta el contenido completo
+        - **`/rag <consulta>`**: Busca en la base de conocimiento documental (RAG) e inyecta el contexto relevante
+        """)
 
     # Chat input fijo al fondo (renderizado dentro de la pestaña Chat)
     prompt = st.chat_input(
-        "Escribe tu pregunta...",
+        "Escribe tu pregunta o usa /memory /rag...",
         disabled=not (core_loaded and agent_loaded)
     )
 
@@ -852,80 +868,74 @@ with tab_config:
 
     st.divider()
 
-    # Formulario para añadir nueva fuente (máx 2)
-    max_sources = 2
-    can_add = len(enabled_sources) < max_sources
+    # Formulario para añadir nueva fuente (sin límite)
+    st.markdown("**Añadir nueva fuente:**")
+    with st.form("add_source_form", clear_on_submit=True):
+        new_name = st.text_input("Nombre", placeholder="Ej: Techbox Docs, Mi Obsidian, GitHub Repo...")
+        new_type = st.selectbox(
+            "Tipo",
+            options=[st.value for st in SourceType],
+            format_func=lambda x: {
+                "url": "🌐 URL (página web, raw GitHub, etc.)",
+                "local_file": "📄 Archivo local (.md, .txt, .pdf)",
+                "local_folder": "📁 Carpeta local (recursivo .md)",
+                "github_folder": "🐙 Carpeta GitHub (owner/repo/folder)"
+            }[x]
+        )
 
-    if can_add:
-        st.markdown("**Añadir nueva fuente:**")
-        with st.form("add_source_form", clear_on_submit=True):
-            new_name = st.text_input("Nombre", placeholder="Ej: Techbox Docs, Mi Obsidian, GitHub Repo...")
-            new_type = st.selectbox(
-                "Tipo",
-                options=[st.value for st in SourceType],
-                format_func=lambda x: {
-                    "url": "🌐 URL (página web, raw GitHub, etc.)",
-                    "local_file": "📄 Archivo local (.md, .txt, .pdf)",
-                    "local_folder": "📁 Carpeta local (recursivo .md)",
-                    "github_folder": "🐙 Carpeta GitHub (owner/repo/folder)"
-                }[x]
-            )
+        # Campo location según tipo
+        if new_type == "url":
+            new_location = st.text_input("URL", placeholder="https://raw.githubusercontent.com/.../file.md")
+            st.caption("💡 Use URLs raw (raw.githubusercontent.com, raw.githack.com) o archivos .md/.txt directos. Evite páginas HTML.")
+        elif new_type == "local_file":
+            new_location = st.text_input("Ruta local", placeholder="C:/Users/.../documento.md o ./docs/archivo.txt")
+        elif new_type == "local_folder":
+            new_location = st.text_input("Ruta carpeta", placeholder="C:/Users/.../obsidian_vault o ./docs")
+        else:  # github_folder
+            new_location = st.text_input("Owner/Repo/Folder", placeholder="usuario/repo/carpeta")
+            col_b1, col_b2 = st.columns(2)
+            with col_b1:
+                github_branch = st.text_input("Branch", value="main")
+            with col_b2:
+                st.caption("Ej: estefglez/techbox-mx/main/docs")
 
-            # Campo location según tipo
+        submitted = st.form_submit_button("➕ Añadir fuente", type="primary", use_container_width=True)
+
+        if submitted and new_name and new_location:
+            # Validación básica de URL antes de añadir
             if new_type == "url":
-                new_location = st.text_input("URL", placeholder="https://raw.githubusercontent.com/.../file.md")
-                st.caption("💡 Use URLs raw (raw.githubusercontent.com, raw.githack.com) o archivos .md/.txt directos. Evite páginas HTML.")
-            elif new_type == "local_file":
-                new_location = st.text_input("Ruta local", placeholder="C:/Users/.../documento.md o ./docs/archivo.txt")
-            elif new_type == "local_folder":
-                new_location = st.text_input("Ruta carpeta", placeholder="C:/Users/.../obsidian_vault o ./docs")
-            else:  # github_folder
-                new_location = st.text_input("Owner/Repo/Folder", placeholder="usuario/repo/carpeta")
-                col_b1, col_b2 = st.columns(2)
-                with col_b1:
-                    github_branch = st.text_input("Branch", value="main")
-                with col_b2:
-                    st.caption("Ej: estefglez/techbox-mx/main/docs")
+                clean_url = new_location.strip().strip('"').strip("'").strip()
+                if not clean_url.startswith(("http://", "https://")):
+                    st.error("La URL debe empezar con http:// o https://")
+                    st.stop()
+                # Advertencia si no parece raw
+                if "github.com" in clean_url and "/raw/" not in clean_url:
+                    st.warning("⚠️ Detectada URL de GitHub que no es 'raw'. Use raw.githubusercontent.com/... para archivos directos.")
 
-            submitted = st.form_submit_button("➕ Añadir fuente", type="primary", use_container_width=True)
+            metadata = {}
+            if new_type == "github_folder":
+                parts = new_location.split("/")
+                if len(parts) >= 3:
+                    metadata = {
+                        "owner": parts[0],
+                        "repo": parts[1],
+                        "folder_path": "/".join(parts[2:]),
+                        "branch": github_branch
+                    }
+                else:
+                    st.error("Formato GitHub: owner/repo/folder_path")
+                    st.stop()
 
-            if submitted and new_name and new_location:
-                # Validación básica de URL antes de añadir
-                if new_type == "url":
-                    clean_url = new_location.strip().strip('"').strip("'").strip()
-                    if not clean_url.startswith(("http://", "https://")):
-                        st.error("La URL debe empezar con http:// o https://")
-                        st.stop()
-                    # Advertencia si no parece raw
-                    if "github.com" in clean_url and "/raw/" not in clean_url:
-                        st.warning("⚠️ Detectada URL de GitHub que no es 'raw'. Use raw.githubusercontent.com/... para archivos directos.")
-
-                metadata = {}
-                if new_type == "github_folder":
-                    parts = new_location.split("/")
-                    if len(parts) >= 3:
-                        metadata = {
-                            "owner": parts[0],
-                            "repo": parts[1],
-                            "folder_path": "/".join(parts[2:]),
-                            "branch": github_branch
-                        }
-                    else:
-                        st.error("Formato GitHub: owner/repo/folder_path")
-                        st.stop()
-
-                rag_source_manager.add_source(
-                    name=new_name,
-                    source_type=new_type,
-                    location=new_location,
-                    enabled=True,
-                    metadata=metadata
-                )
-                st.success(f"Fuente '{new_name}' añadida. Se indexará automáticamente.")
-                st.session_state.rag_reindex_triggered = True
-                st.rerun()
-    else:
-        st.warning(f"Máximo {max_sources} fuentes simultáneas. Elimina una para añadir otra.")
+            rag_source_manager.add_source(
+                name=new_name,
+                source_type=new_type,
+                location=new_location,
+                enabled=True,
+                metadata=metadata
+            )
+            st.success(f"Fuente '{new_name}' añadida. Se indexará automáticamente.")
+            st.session_state.rag_reindex_triggered = True
+            st.rerun()
 
     st.divider()
 

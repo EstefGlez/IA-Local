@@ -4,7 +4,7 @@ import re
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Tuple
 
 # Monitor de recursos (opcional)
 try:
@@ -223,9 +223,10 @@ def execute_save_json_memory(session_id: str, memory_data: dict) -> dict:
         }
 
 
-def search_saved_memories(session_id: str, query: str) -> dict:
+def search_memory_files(session_id: str, query: str) -> dict:
     """
     Busca en los archivos de memoria JSON de una sesión usando una query de texto.
+    Función determinista (no tool-calling) para uso explícito via comando /memory.
 
     Busca coincidencias en:
     - metadata.topic (tema de la memoria)
@@ -288,9 +289,9 @@ def search_saved_memories(session_id: str, query: str) -> dict:
                     matched_fields.append("content")
 
                 if match_score > 0:
-                    # Crear snippet del contenido (primeros 300 chars)
-                    snippet = content.get("respuesta_completa", "")[:300]
-                    if len(content.get("respuesta_completa", "")) > 300:
+                    # Crear snippet del contenido (primeros 500 chars)
+                    snippet = content.get("respuesta_completa", "")[:500]
+                    if len(content.get("respuesta_completa", "")) > 500:
                         snippet += "..."
 
                     results.append({
@@ -299,7 +300,8 @@ def search_saved_memories(session_id: str, query: str) -> dict:
                         "saved_at": metadata.get("saved_at", "Desconocido"),
                         "match_score": match_score,
                         "matched_fields": matched_fields,
-                        "snippet": snippet
+                        "snippet": snippet,
+                        "full_content": content.get("respuesta_completa", "")
                     })
 
             except Exception as e:
@@ -321,32 +323,6 @@ def search_saved_memories(session_id: str, query: str) -> dict:
             "results": [],
             "message": f"Error al buscar memorias: {str(e)}"
         }
-
-
-def get_search_memories_tool() -> dict:
-    """
-    Devuelve la definición de la herramienta search_saved_memories para tool calling.
-
-    Returns:
-        Diccionario con la especificación de la herramienta compatible con Ollama
-    """
-    return {
-        "type": "function",
-        "function": {
-            "name": "search_saved_memories",
-            "description": "Busca en los archivos de memoria guardados de la sesión actual. Úsala SOLO cuando el usuario pregunte por información guardada previamente, pida revisar memorias anteriores, o quiera consultar algo que se haya guardado como memoria.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "query": {
-                        "type": "string",
-                        "description": "Término de búsqueda (ej: 'pandas', 'filtros', 'preferencias usuario', 'configuración')"
-                    }
-                },
-                "required": ["query"]
-            }
-        }
-    }
 
 
 def _extract_balanced_json(text: str, start_idx: int = 0) -> Optional[str]:
@@ -730,39 +706,39 @@ class ConversationalAgent:
         self.retriever = retriever
         self.ollama_client = ollama_client
         self.top_k = top_k
-        # System prompt con herramienta de lectura de memorias
+        # System prompt limpio - sin lógica de herramientas ni restricciones de directorios
         self.system_instruction = system_instruction or (
-            "Eres un asistente de IA útil, experto en programación, desarrollo de software, SQL, Python y análisis de datos. "
-            "Responde de forma natural, clara y precisa. Proporciona explicaciones detalladas, código completo cuando sea relevante, "
-            "y contexto suficiente para ser útil.\n\n"
-            "### Herramienta disponible: search_saved_memories\n"
-            "Tienes acceso a una herramienta para buscar en los archivos de memoria guardados de la sesión actual. "
-            "Esta herramienta es EXCLUSIVAMENTE para cuando el usuario pida EXPLÍCITAMENTE buscar en sus memorias, "
-            "archivos guardados o notas previas.\n\n"
-            "Ejemplos de cuándo SÍ usarla:\n"
-            "- \"busca en mis memorias sobre...\"\n"
-            "- \"¿qué guardé sobre...?\"\n"
-            "- \"recupera mi archivo de...\"\n"
-            "- \"busca en mis notas previas...\"\n\n"
-            "### DIRECTIVA ESTRICTA - PREGUNTAS GENERALES:\n"
-            "Para preguntas generales (ej: \"¿Qué información tienes de análisis de datos?\", \"¿Quién eres?\", "
-            "\"explícame pandas\", \"cómo hago un join en SQL\"):\n"
-            "1. Responde de forma natural con tu conocimiento general.\n"
-            "2. NO invoques search_saved_memories.\n"
-            "3. NO asumas que el usuario te pide buscar archivos guardados.\n"
-            "4. La herramienta es SOLO para recuperación explícita de memorias del usuario.\n\n"
-            "### REGLA CRÍTICA DE PRESENTACIÓN DE RESULTADOS:\n"
-            "Cuando invoques search_saved_memories y esta devuelva resultados con archivos encontrados:\n"
-            "1. DEBES mostrar directamente al usuario el CONTENIDO COMPLETO (respuesta_completa) de cada archivo encontrado en tu respuesta final.\n"
-            "2. NO preguntes al usuario '¿Quieres que te muestre el contenido?' o '¿Te interesa ver...?' - la herramienta YA te entregó la información, preséntala de inmediato.\n"
-            "3. Integra el contenido de forma natural y organizada, citando el tema y nombre de archivo de cada memoria.\n"
-            "4. Si hay múltiples resultados, presenta todos los contenidos completos, no solo resúmenes."
+            "Eres un asistente de IA útil, experto en tecnología, desarrollo de software, SQL, Python y análisis de datos. "
+            "Responde de forma natural, fluida, técnica y precisa. "
+            "Formatea tus respuestas usando Markdown de manera clara y estructurada. "
+            "Proporciona explicaciones detalladas, código completo cuando sea relevante, y contexto suficiente para ser útil. "
+            "Reduce al mínimo la tendencia a alucinar: si no sabes algo, dilo honestamente."
         )
         self.rag_source_manager = rag_source_manager
         self._rag_enabled = True  # Flag para fallback graceful
 
-        # Tool de lectura de memorias (guardado se maneja desde UI)
-        self.tools = [get_search_memories_tool()]
+        # Sin tools: el flujo de memoria/RAG es determinista via comandos /memory y /rag
+        self.tools = []
+
+    def _format_memory_results(self, results: List[dict]) -> str:
+        """
+        Formatea los resultados de búsqueda de memoria para inyectarlos al prompt.
+        Incluye el contenido completo de cada archivo encontrado.
+        """
+        if not results:
+            return "Sin resultados."
+
+        formatted = []
+        for i, r in enumerate(results, 1):
+            formatted.append(
+                f"--- MEMORIA #{i} ---\n"
+                f"Archivo: {r.get('filename', 'desconocido')}\n"
+                f"Tema: {r.get('topic', 'sin tema')}\n"
+                f"Guardado: {r.get('saved_at', 'desconocido')}\n"
+                f"Campos coincidentes: {', '.join(r.get('matched_fields', []))}\n"
+                f"CONTENIDO COMPLETO:\n{r.get('full_content', '(vacío)')}\n"
+            )
+        return "\n".join(formatted)
 
     def ask(
         self,
@@ -778,123 +754,158 @@ class ConversationalAgent:
     ) -> tuple[str, dict]:
         """
         Genera una respuesta usando el historial completo de la conversación.
+        Implementa ruteador de comandos explícitos:
+        - /memory <query> : búsqueda determinista en archivos JSON de memoria
+        - /rag <query>    : búsqueda en base de conocimiento documental (RAG)
+        - mensaje normal  : conversación general (sin RAG ni memoria automática)
 
         Args:
             pregunta: Pregunta actual del usuario
             history: Historial de mensajes [{"role": "user|assistant", "content": "..."}]
-            source: Fuente RAG específica a filtrar
+            source: Fuente RAG específica a filtrar (para /rag)
             top_k: Número de chunks a recuperar
             temperature: Temperatura de muestreo
             session_samples: Lista de muestras de recursos para métricas de sesión
             session_start_time: Timestamp de inicio de sesión
             context_window_scale: Escala de ventana de contexto (0.1 a 1.0).
                                  0.1 = últimos 2-4 mensajes, 1.0 = historial completo.
-            session_id: ID de la sesión actual (necesario para tool calling de memoria)
+            session_id: ID de la sesión actual (necesario para búsqueda de memoria)
 
         Returns:
             Tupla (respuesta, metrics_dict)
         """
         k = top_k or self.top_k
-        rag_fallback = False
+        tool_results = []
+
+        # Variables para métricas (inicializadas con defaults)
+        chars_before = 0
+        chars_after = 0
+        num_ctx = 2048
+        rag_used = False
+        rag_fallback = True
+
+        # ============================================================
+        # RUTEADOR DE COMANDOS EXPLÍCITOS
+        # ============================================================
+        stripped_pregunta = pregunta.strip()
+        is_memory_cmd = stripped_pregunta.startswith("/memory")
+        is_rag_cmd = stripped_pregunta.startswith("/rag")
+
+        # Extraer query del comando
+        if is_memory_cmd:
+            query = stripped_pregunta[len("/memory"):].strip()
+            if not query:
+                return ("Uso: `/memory <término de búsqueda>` - Busca en tus archivos de memoria guardados.", {
+                    "elapsed_time": 0, "tool_calls_executed": 1,
+                    "tool_results": [{"type": "memory_help", "success": True, "message": "Ayuda de comando /memory"}],
+                    "rag_used": False, "rag_fallback": True
+                })
+            # Ejecutar búsqueda de memoria determinista
+            if session_id:
+                memory_result = search_memory_files(session_id, query)
+                tool_results.append({
+                    "type": "search_memory",
+                    "success": memory_result.get("success", False),
+                    "message": memory_result.get("message", ""),
+                    "data": memory_result
+                })
+                # Inyectar resultados al prompt para que el modelo los presente
+                if memory_result.get("results"):
+                    memory_context = self._format_memory_results(memory_result["results"])
+                    pregunta = f"{pregunta}\n\n[RESULTADOS DE MEMORIA ENCONTRADOS - Presenta el contenido completo de cada archivo:]\n{memory_context}"
+                else:
+                    pregunta = f"{pregunta}\n\n[NO SE ENCONTRARON MEMORIAS COINCIDENTES PARA: '{query}']"
+            else:
+                return ("No hay sesión activa para buscar memorias.", {
+                    "elapsed_time": 0, "tool_calls_executed": 1,
+                    "tool_results": [{"type": "memory_error", "success": False, "message": "Sin session_id"}],
+                    "rag_used": False, "rag_fallback": True
+                })
+
+        elif is_rag_cmd:
+            query = stripped_pregunta[len("/rag"):].strip()
+            if not query:
+                return ("Uso: `/rag <consulta>` - Busca en la base de conocimiento documental (RAG).", {
+                    "elapsed_time": 0, "tool_calls_executed": 1,
+                    "tool_results": [{"type": "rag_help", "success": True, "message": "Ayuda de comando /rag"}],
+                    "rag_used": False, "rag_fallback": True
+                })
+            # Ejecutar búsqueda RAG determinista
+            rag_used = True
+            rag_fallback = False
+            if self._rag_enabled and self.rag_source_manager and self.rag_source_manager.has_sources():
+                chunks = self.retriever.search(query, top_k=k, source=source)
+                if chunks:
+                    raw_context = "\n\n---\n\n".join(chunks)
+                    cleaned_context = clean_html_content(raw_context)
+                    chars_before = len(raw_context)
+                    chars_after = len(cleaned_context)
+                    estimated_tokens = chars_after // 4
+                    num_ctx = 4096 if estimated_tokens > 800 else 2048
+                    # Inyectar contexto RAG al prompt
+                    pregunta = f"{pregunta}\n\n[CONTEXTO RAG RECUPERADO PARA: '{query}']\n{cleaned_context}"
+                else:
+                    pregunta = f"{pregunta}\n\n[NO SE ENCONTRÓ CONTEXTO RAG RELEVANTE PARA: '{query}']"
+                    chars_before = chars_after = 0
+                    num_ctx = 2048
+                tool_results.append({
+                    "type": "search_rag",
+                    "success": True,
+                    "message": f"RAG consultado para: '{query}' ({len(chunks)} chunks)" if chunks else f"RAG sin resultados para: '{query}'",
+                    "data": {"chunks_found": len(chunks)}
+                })
+            else:
+                pregunta = f"{pregunta}\n\n[RAG NO DISPONIBLE: No hay fuentes configuradas o RAG deshabilitado]"
+                chars_before = chars_after = 0
+                num_ctx = 2048
+                rag_fallback = True
+                tool_results.append({
+                    "type": "search_rag",
+                    "success": False,
+                    "message": "RAG no disponible",
+                    "data": {}
+                })
+        else:
+            # Mensaje normal: conversación general SIN RAG ni memoria automática
+            chars_before = chars_after = 0
+            num_ctx = 2048
+            rag_fallback = True
 
         # Recortar historial según la escala de ventana de contexto
         if history:
             history = trim_history_by_scale(history, context_window_scale)
 
-        # 1. Recuperar contexto desde el retriever (si RAG está habilitado)
-        if self._rag_enabled and self.rag_source_manager and self.rag_source_manager.has_sources():
-            search_source = source
-            chunks = self.retriever.search(pregunta, top_k=k, source=search_source)
-        else:
-            chunks = self.retriever.search(pregunta, top_k=k, source=None)
-            rag_fallback = True
+        # Construir mensajes para chat - siempre system + history + pregunta (con contexto ya inyectado)
+        messages = [
+            {"role": "system", "content": self.system_instruction},
+        ]
 
-        if chunks:
-            raw_context = "\n\n---\n\n".join(chunks)
-            cleaned_context = clean_html_content(raw_context)
+        # Añadir indicador de modo solo para conversación general
+        if not is_memory_cmd and not is_rag_cmd:
+            messages.append({"role": "system", "content": "[CONVERSACIÓN GENERAL - Sin contexto RAG ni memoria automática]"})
 
-            chars_before = len(raw_context)
-            chars_after = len(cleaned_context)
-
-            estimated_tokens = chars_after // 4
-            num_ctx = 4096 if estimated_tokens > 800 else 2048
-
-            if estimated_tokens > 800:
-                print(f"   [INFO] Contexto grande detectado ({estimated_tokens:,} tokens est.) -> ampliando ventana a {num_ctx}")
-
-            # Construir mensajes para chat: system + context + history + current question
-            messages = [
-                {"role": "system", "content": self.system_instruction},
-                {"role": "system", "content": f"CONTEXTO RECUPERADO:\n{cleaned_context}"},
-            ]
-        else:
-            chars_before = 0
-            chars_after = 0
-            num_ctx = 2048
-            # Modo fallback: sin contexto RAG
-            messages = [
-                {"role": "system", "content": self.system_instruction},
-            ]
-            if rag_fallback or not self._rag_enabled:
-                messages.append({"role": "system", "content": "[MODO OFFLINE - Sin contexto RAG disponible]"})
-            else:
-                messages.append({"role": "system", "content": "No se encontró contexto relevante para la pregunta."})
-
-        # Añadir historial de conversación recortado (excluyendo el system prompt actual)
+        # Añadir historial de conversación recortado
         if history:
             for msg in history:
                 if msg["role"] in ("user", "assistant"):
                     messages.append(msg)
 
-        # Añadir pregunta actual
+        # Añadir pregunta actual (ya modificada con contexto si aplica)
         messages.append({"role": "user", "content": pregunta})
 
-        # 2. Inferencia con monitoreo de recursos y tool calling
+        # Añadir historial de conversación recortado
+        if history:
+            for msg in history:
+                if msg["role"] in ("user", "assistant"):
+                    messages.append(msg)
+
+        # Añadir pregunta actual (ya modificada con contexto si aplica)
+        messages.append({"role": "user", "content": pregunta})
+
+        # 2. Inferencia con monitoreo de recursos (SIN tools)
         start_time = time.perf_counter()
-        tool_results = []
 
-        # Función auxiliar para ejecutar tool calling
-        def execute_tool_calls(response_msg: dict, current_session_id: str) -> list:
-            """Ejecuta las tool calls del modelo y devuelve lista de resultados."""
-            results = []
-            tool_calls = response_msg.get("tool_calls", [])
-
-            for tool_call in tool_calls:
-                if not isinstance(tool_call, dict):
-                    continue
-
-                function = tool_call.get("function", {})
-                name = function.get("name")
-                arguments = function.get("arguments", {})
-
-                if name == "search_saved_memories" and current_session_id:
-                    query = arguments.get("query", "")
-                    if query:
-                        result = search_saved_memories(current_session_id, query)
-                        results.append({
-                            "type": "search_memories",
-                            "success": result.get("success", False),
-                            "message": result.get("message", ""),
-                            "data": result
-                        })
-                    else:
-                        results.append({
-                            "type": "search_memories",
-                            "success": False,
-                            "message": "Query vacío en tool call",
-                            "data": {"results": []}
-                        })
-                else:
-                    results.append({
-                        "type": "unknown_tool",
-                        "success": False,
-                        "message": f"Herramienta desconocida: {name}",
-                        "data": {}
-                    })
-
-            return results
-
-        # Primera llamada al modelo (con tools disponibles)
+        # Llamada al modelo (SIN tools - flujo determinista)
         if MONITOR_AVAILABLE:
             with monitor_resources(
                 interval=0.3,
@@ -905,7 +916,7 @@ class ConversationalAgent:
                     messages=messages,
                     temperature=temperature,
                     num_ctx=num_ctx,
-                    tools=self.tools
+                    tools=self.tools  # Lista vacía
                 )
                 samples = monitor.stop()
         else:
@@ -913,57 +924,11 @@ class ConversationalAgent:
                 messages=messages,
                 temperature=temperature,
                 num_ctx=num_ctx,
-                tools=self.tools
+                tools=self.tools  # Lista vacía
             )
             samples = []
 
         content = response.get("content", "")
-        tool_calls = response.get("tool_calls", [])
-
-        # Si el modelo invocó tools, ejecutarlas
-        if tool_calls:
-            executed_results = execute_tool_calls(response, session_id)
-            tool_results.extend(executed_results)
-
-            # Si hubo resultados de búsqueda de memorias, hacer segunda llamada con los resultados
-            if executed_results:
-                # Añadir respuesta del modelo (con tool_calls) al historial
-                messages.append(response)
-
-                # Añadir resultados de tools como mensajes de tool
-                for tool_result in executed_results:
-                    if tool_result["type"] == "search_memories":
-                        tool_content = json.dumps(tool_result["data"], ensure_ascii=False)
-                        messages.append({
-                            "role": "tool",
-                            "content": tool_content,
-                            "name": "search_saved_memories"
-                        })
-
-                # Segunda llamada al modelo con resultados de tools
-                if MONITOR_AVAILABLE:
-                    with monitor_resources(
-                        interval=0.3,
-                        all_samples=session_samples,
-                        session_start_time=session_start_time,
-                    ) as monitor:
-                        response = self.ollama_client.chat(
-                            messages=messages,
-                            temperature=temperature,
-                            num_ctx=num_ctx,
-                            tools=self.tools
-                        )
-                        more_samples = monitor.stop()
-                        samples.extend(more_samples)
-                else:
-                    response = self.ollama_client.chat(
-                        messages=messages,
-                        temperature=temperature,
-                        num_ctx=num_ctx,
-                        tools=self.tools
-                    )
-
-                content = response.get("content", "")
 
         # Sanitizar respuesta (eliminar JSON crudo de herramientas alucinadas si las hay)
         final_response, extracted_proposals = sanitize_model_response(content)
@@ -1017,7 +982,7 @@ class ConversationalAgent:
             "samples": num_samples,
             "dashboard_path": "performance_dashboard.png",
             "session_samples": session_samples,
-            "rag_used": not rag_fallback and self._rag_enabled,
+            "rag_used": rag_used,
             "rag_fallback": rag_fallback,
             "tool_calls_executed": len(tool_results),
             "tool_results": tool_results,
